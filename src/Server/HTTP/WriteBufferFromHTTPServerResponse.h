@@ -27,7 +27,8 @@ class WriteBufferFromHTTPServerResponse final : public HTTPWriteBuffer
 public:
     static constexpr std::string_view EXCEPTION_MARKER = "__exception__";
     static constexpr size_t EXCEPTION_TAG_LENGTH = 16;
-    static constexpr size_t MAX_EXCEPTION_SIZE= 16 * 1024; // 16K
+    static constexpr size_t MAX_EXCEPTION_SIZE = 16 * 1024; // 16K
+    static constexpr size_t MAX_STRUCTURED_EXCEPTION_SIZE = 1024 * 1024; // 1 MiB
 
     WriteBufferFromHTTPServerResponse(
         HTTPServerResponse & response_,
@@ -66,7 +67,12 @@ public:
 
     void setExceptionCode(int code);
 
-    bool cancelWithException(HTTPServerRequest & request, int exception_code_, const std::string & message, WriteBuffer * compression_buffer) noexcept;
+    bool cancelWithException(
+        HTTPServerRequest & request,
+        int exception_code_,
+        const std::string & message,
+        WriteBuffer * compression_buffer,
+        bool structured_exception = false) noexcept;
 
 private:
     /// Send at least HTTP headers if no data has been sent yet.

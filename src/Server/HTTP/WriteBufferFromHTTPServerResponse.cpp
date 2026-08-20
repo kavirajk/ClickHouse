@@ -241,7 +241,12 @@ bool WriteBufferFromHTTPServerResponse::isFixedLength() const
     return HTTPWriteBuffer::isFixedLength();
 }
 
-bool WriteBufferFromHTTPServerResponse::cancelWithException(HTTPServerRequest & request, int exception_code_, const std::string & message, WriteBuffer * compression_buffer) noexcept
+bool WriteBufferFromHTTPServerResponse::cancelWithException(
+    HTTPServerRequest & request,
+    int exception_code_,
+    const std::string & message,
+    WriteBuffer * compression_buffer,
+    bool structured_exception) noexcept
 {
     bool use_compression_buffer = compression_buffer && !compression_buffer->isCanceled() && !compression_buffer->isFinalized();
 
@@ -358,7 +363,8 @@ bool WriteBufferFromHTTPServerResponse::cancelWithException(HTTPServerRequest & 
             // 8 byte represents - <message_length>
             size_t size_message_excluded = 2 + EXCEPTION_MARKER.size() + 2 + EXCEPTION_TAG_LENGTH + 2 + 8 + 1 + EXCEPTION_TAG_LENGTH + 2 + EXCEPTION_MARKER.size() + 2;
 
-            size_t max_exception_message_size = MAX_EXCEPTION_SIZE - size_message_excluded;
+            const size_t max_exception_size = structured_exception ? MAX_STRUCTURED_EXCEPTION_SIZE : MAX_EXCEPTION_SIZE;
+            size_t max_exception_message_size = max_exception_size - size_message_excluded;
 
             writeCString("\r\n", out);
             writeString(EXCEPTION_MARKER, out);
@@ -366,8 +372,15 @@ bool WriteBufferFromHTTPServerResponse::cancelWithException(HTTPServerRequest & 
             writeString(exception_tag, out);
             writeCString("\r\n", out);
 
+            if (structured_exception && message.size() > max_exception_message_size)
+                throw Exception(
+                    ErrorCodes::TOO_LARGE_STRING_SIZE,
+                    "Structured HTTP exception is too large: {} bytes, maximum: {}",
+                    message.size(),
+                    max_exception_message_size);
+
             std::string limited_message = message;
-            if (limited_message.size() > max_exception_message_size)
+            if (!structured_exception && limited_message.size() > max_exception_message_size)
                 limited_message = limited_message.substr(0, max_exception_message_size);
 
             writeString(limited_message, out);

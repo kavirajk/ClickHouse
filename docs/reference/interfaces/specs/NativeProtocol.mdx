@@ -499,6 +499,9 @@ Server → Client. No body — the packet is a single byte `0x04` before chunked
 
 Server → Client. Sent when the server hits an error during any phase.
 
+For negotiated revisions below `54492`, and for exceptions sent before the server has
+successfully sent `ServerHello`, the body uses the legacy layout:
+
 | # | Field       | Type   | Role      | Description |
 |---|-------------|--------|-----------|-------------|
 | 1 | code        | Int32  | universal | Error code |
@@ -506,6 +509,37 @@ Server → Client. Sent when the server hits an error during any phase.
 | 3 | message     | String | universal | Human-readable error message |
 | 4 | stack_trace | String | universal | Server-side stack trace |
 | 5 | has_nested (obsolete) | Bool   | universal | Obsolete compatibility byte. Always written as `false` by the server |
+
+Starting with revision `54492`, exceptions sent after `ServerHello` use a versioned
+structured body:
+
+| # | Field        | Type   | Description |
+|---|--------------|--------|-------------|
+| 1 | version      | UInt16 | Structured exception model version. Version 1 is specified below |
+| 2 | payload_size | VarUInt | Number of bytes in `payload` |
+| 3 | payload      | bytes  | Positional fields for the selected model version |
+
+The version 1 `payload` has this layout:
+
+| # | Field              | Type     | Description |
+|---|--------------------|----------|-------------|
+| 1 | code               | Int32    | Numeric ClickHouse error code |
+| 2 | name               | String   | Exception class, for example `"DB::Exception"` |
+| 3 | code_name          | String   | Symbolic error name, for example `"UNKNOWN_IDENTIFIER"` |
+| 4 | category           | UInt8    | `0` unknown, `1` user error, `2` resource limit, `3` transient error, `4` internal error, `5` external error |
+| 5 | message            | String   | Human-readable message without transport decoration |
+| 6 | query_id           | String   | Query identifier, or empty when it is unavailable |
+| 7 | query              | String   | Masked and bounded SQL text, or empty when it is unavailable |
+| 8 | hints_count        | VarUInt  | Number of following hint strings |
+| 9 | hints              | String[] | Suggestions that may help correct the query |
+| 10 | context_count     | VarUInt  | Number of following context strings |
+| 11 | context           | String[] | Ordered context collected while propagating the exception |
+| 12 | retryable         | Bool     | Whether retrying the same operation is known to be safe |
+| 13 | formatted_message | String   | Full human-readable exception message |
+| 14 | stack_trace       | String   | Server-side stack trace, when requested and permitted |
+
+The payload is bounded to 128 KiB. A model version defines a complete positional
+schema; changing field order or encoding requires a new model version.
 
 ### Query (packet type 1) {#query}
 

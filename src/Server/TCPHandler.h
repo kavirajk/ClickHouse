@@ -205,6 +205,7 @@ private:
     UInt64 client_version_minor = 0;
     UInt64 client_version_patch = 0;
     UInt32 client_tcp_protocol_version = 0;
+    bool server_hello_sent = false;
     UInt32 client_parallel_replicas_protocol_version = 0;
     String proto_send_chunked_cl = "notchunked";
     String proto_recv_chunked_cl = "notchunked";
@@ -316,7 +317,7 @@ private:
     void sendData(QueryState & state, const Block & block); /// Write a block to the network.
     static void sendLogData(QueryState & state, const Block & block, std::shared_ptr<WriteBufferFromPocoSocketChunked> out, UInt32 client_tcp_protocol_version);
     void sendTableColumns(QueryState & state, const ColumnsDescription & columns);
-    void sendException(const Exception & e, bool with_stack_trace);
+    void sendException(const Exception & e, bool with_stack_trace, const QueryState * state = nullptr);
     /// Send an exception when the connection buffers are not initialized yet
     /// (for example, when their allocation failed because the server memory limit is reached).
     void trySendExceptionWithoutConnectionBuffers(const Exception & e);

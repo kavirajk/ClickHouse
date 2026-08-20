@@ -38,7 +38,10 @@
 #include <Common/logger_useful.h>
 #include <Common/maskSensitiveQueryParameters.h>
 #include <Common/SettingsChanges.h>
+#include <Common/SensitiveDataMasker.h>
 #include <Common/StringUtils.h>
+#include <Common/StructuredException.h>
+#include <Common/ThreadStatus.h>
 #include <Common/scope_guard_safe.h>
 #include <Common/setThreadName.h>
 #include <Common/typeid_cast.h>
@@ -125,6 +128,56 @@ namespace FailPoints
 
 namespace
 {
+constexpr std::string_view STRUCTURED_EXCEPTION_MEDIA_TYPE = "application/vnd.clickhouse.exception+json";
+
+bool requestsStructuredExceptionV1(const HTTPServerRequest & request)
+{
+    const String accept = request.get("Accept", "");
+    size_t begin = 0;
+    while (begin < accept.size())
+    {
+        size_t end = accept.find(',', begin);
+        String item = accept.substr(begin, end == String::npos ? String::npos : end - begin);
+        boost::trim(item);
+
+        size_t semicolon = item.find(';');
+        String media_type = item.substr(0, semicolon);
+        boost::trim(media_type);
+        if (boost::iequals(media_type, STRUCTURED_EXCEPTION_MEDIA_TYPE) && semicolon != String::npos)
+        {
+            String parameters = item.substr(semicolon + 1);
+            size_t parameter_begin = 0;
+            while (parameter_begin < parameters.size())
+            {
+                size_t parameter_end = parameters.find(';', parameter_begin);
+                String parameter = parameters.substr(
+                    parameter_begin, parameter_end == String::npos ? String::npos : parameter_end - parameter_begin);
+                boost::trim(parameter);
+
+                const size_t equals = parameter.find('=');
+                if (equals != String::npos)
+                {
+                    String name = parameter.substr(0, equals);
+                    String value = parameter.substr(equals + 1);
+                    boost::trim(name);
+                    boost::trim(value);
+                    if (boost::iequals(name, "version") && (value == "1" || value == "\"1\""))
+                        return true;
+                }
+
+                if (parameter_end == String::npos)
+                    break;
+                parameter_begin = parameter_end + 1;
+            }
+        }
+
+        if (end == String::npos)
+            break;
+        begin = end + 1;
+    }
+    return false;
+}
+
 /// Whether the request declares a body that the HTTP handler layer reads by itself, regardless of the query:
 /// Poco's `HTMLForm` loads `application/x-www-form-urlencoded` payloads, and `multipart/form-data` is parsed as
 /// "external data for query processing". Such a body must come with a length on a non-chunked request.
@@ -347,6 +400,7 @@ void HTTPHandler::processQuery(
     std::erase_if(query_id, [](unsigned char c) { return isControlASCII(c) || c == 0x7F; });
 
     context->setCurrentQueryId(query_id);
+    used_output.query_id = context->getCurrentQueryId();
 
     bool has_external_data = startsWith(request.getContentType(), "multipart/form-data");
 
@@ -955,6 +1009,7 @@ void HTTPHandler::processQuery(
     /// SQL comes from the request body, `final_query` is empty and the body is concatenated below;
     /// the engine then wraps the parsed body query just the same.
     const String & query = final_query;
+    used_output.query = wipeSensitiveDataAndCutToLength(query, StructuredException::MAX_QUERY_SIZE, true);
     std::unique_ptr<ReadBuffer> in_param = std::make_unique<ReadBufferFromString>(query);
 
     used_output.out_holder->setSendProgress(settings[Setting::send_progress_in_http_headers]);
@@ -1188,6 +1243,11 @@ void HTTPHandler::processQuery(
         if (framing)
             used_output.framed = true;
 
+        /// The generic tagged exception block can carry the complete structured JSON object.
+        /// Legacy format-specific exception writers accept only a human-readable string.
+        if (used_output.structured_exception && !framing)
+            return;
+
         /// With a framing format, the exception is always written as a separate packet, because the
         /// client parses the response as a stream of packets. Otherwise the exception is written into
         /// the output format if the format supports it and the corresponding setting is enabled.
@@ -1237,7 +1297,7 @@ void HTTPHandler::processQuery(
                         if (framing_profile_events_queue)
                             framing_for_exception->setProfileEventsQueue(
                                 framing_profile_events_queue, framing_profile_events_host_name, framing_profile_events_period_us);
-                        framing_for_exception->setException(message);
+                        framing_for_exception->setException(message, used_output.structured_exception);
                         framing_for_exception->finalize();
                     }
                     else
@@ -1256,15 +1316,26 @@ void HTTPHandler::processQuery(
                 if (used_output.out_holder->isCanceled())
                     return;
 
-                bool with_stacktrace = (params.getParsed<bool>("stacktrace", false) && server.config().getBool("enable_http_stacktrace", true));
-                ExecutionStatus status = ExecutionStatus::fromCurrentException("", with_stacktrace);
+                const auto exception = std::current_exception();
+                const bool with_stacktrace = params.getParsed<bool>("stacktrace", false)
+                    && server.config().getBool("enable_http_stacktrace", true);
+                const ExecutionStatus status = ExecutionStatus::fromCurrentException("", with_stacktrace);
+                String exception_message = status.message;
+                if (used_output.structured_exception)
+                {
+                    if (used_output.query.empty() && CurrentThread::isInitialized())
+                        used_output.query = wipeSensitiveDataAndCutToLength(
+                            CurrentThread::get().getQueryForLog(), StructuredException::MAX_QUERY_SIZE, true);
+                    exception_message = StructuredException::fromExceptionPtr(
+                        exception, with_stacktrace, used_output.query_id, used_output.query).toJSON();
+                }
 
                 drainRequestIfNeeded(request, response);
                 used_output.out_holder->setExceptionCode(status.code);
                 if (framing)
-                    framing->setException(status.message);
+                    framing->setException(exception_message, used_output.structured_exception);
                 else
-                    current_output_format.setException(status.message);
+                    current_output_format.setException(exception_message);
                 current_output_format.finalize();
                 /// The output format may defer finalizing the framing format (see
                 /// `deferFramingFinalize`); finalize it here so the exception packet is written.
@@ -1353,7 +1424,7 @@ try
     {
         /// If nothing was sent yet and we don't even know if we must compress the response.
         auto wb = WriteBufferFromHTTPServerResponse(response, request.getMethod() == HTTPRequest::HTTP_HEAD);
-        return wb.cancelWithException(request, exception_code, message, nullptr);
+        return wb.cancelWithException(request, exception_code, message, nullptr, used_output.structured_exception);
     }
 
     /// A framed response fails closed once its transmission has started. That covers a failure in
@@ -1437,7 +1508,8 @@ try
     /// Send the error message into already used (and possibly compressed) stream.
     /// Note that the error message will possibly be sent after some data.
     /// Also HTTP code 200 could have already been sent.
-    return used_output.out_holder->cancelWithException(request, exception_code, message, used_output.out_maybe_compressed.get());
+    return used_output.out_holder->cancelWithException(
+        request, exception_code, message, used_output.out_maybe_compressed.get(), used_output.structured_exception);
 }
 catch (...)
 {
@@ -1457,6 +1529,7 @@ void HTTPHandler::handleRequest(HTTPServerRequest & request, HTTPServerResponse 
     QueryScope query_scope;
 
     Output used_output;
+    used_output.structured_exception = requestsStructuredExceptionV1(request);
 
     /// In case of exception, send stack trace to client.
     bool with_stacktrace = false;
@@ -1503,7 +1576,9 @@ void HTTPHandler::handleRequest(HTTPServerRequest & request, HTTPServerResponse 
         thread_trace_context->root_span.addAttribute("http.method", request.getMethod());
 
         response.setContentType("text/plain; charset=UTF-8");
-        response.add("Access-Control-Expose-Headers", "X-ClickHouse-Query-Id,X-ClickHouse-Summary,X-ClickHouse-Server-Display-Name,X-ClickHouse-Format,X-ClickHouse-Timezone,X-ClickHouse-Exception-Code,X-ClickHouse-Exception-Tag");
+        response.add("Access-Control-Expose-Headers", "X-ClickHouse-Query-Id,X-ClickHouse-Summary,X-ClickHouse-Server-Display-Name,X-ClickHouse-Format,X-ClickHouse-Timezone,X-ClickHouse-Exception-Code,X-ClickHouse-Exception-Tag,X-ClickHouse-Exception-Format");
+        if (used_output.structured_exception)
+            response.set("X-ClickHouse-Exception-Format", "structured; version=1");
         response.set("X-ClickHouse-Server-Display-Name", server_display_name);
 
         if (!request.get("Origin", "").empty())
@@ -1565,14 +1640,26 @@ void HTTPHandler::handleRequest(HTTPServerRequest & request, HTTPServerResponse 
             request_credentials.reset(); // ...so that the next requests on the connection have to always start afresh in case of exceptions.
         });
 
+        const auto exception = std::current_exception();
         tryLogCurrentException(log);
 
         /** If exception is received from remote server, then stack trace is embedded in message.
           * If exception is thrown on local server, then stack trace is in separate field.
           */
         const bool include_version = session && session->sessionContext();
-        ExecutionStatus status = ExecutionStatus::fromCurrentException("", with_stacktrace, include_version);
-        auto error_sent = trySendExceptionToClient(status.code, status.message, request, response, used_output);
+        const ExecutionStatus status = ExecutionStatus::fromCurrentException("", with_stacktrace, include_version);
+        String exception_message = status.message;
+        if (used_output.structured_exception)
+        {
+            if (used_output.query.empty() && CurrentThread::isInitialized())
+                used_output.query = wipeSensitiveDataAndCutToLength(
+                    CurrentThread::get().getQueryForLog(), StructuredException::MAX_QUERY_SIZE, true);
+            exception_message = StructuredException::fromExceptionPtr(
+                exception, with_stacktrace, used_output.query_id, used_output.query).toJSON();
+        }
+        if (used_output.structured_exception && !response.sent())
+            response.setContentType("application/vnd.clickhouse.exception+json; version=1");
+        auto error_sent = trySendExceptionToClient(status.code, exception_message, request, response, used_output);
 
         used_output.cancel();
 

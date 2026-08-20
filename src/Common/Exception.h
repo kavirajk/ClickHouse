@@ -28,6 +28,7 @@ namespace DB
 {
 
 class AtomicLogger;
+struct StructuredException;
 
 /// This flag can be set for testing purposes - to check that no exceptions are thrown.
 extern bool terminate_on_any_exception;
@@ -74,6 +75,10 @@ public:
         message_format_string = o.message_format_string;
         message_format_string_args = o.message_format_string_args;
         capture_thread_frame_pointers = o.capture_thread_frame_pointers;
+        hints = o.hints;
+        contexts = o.contexts;
+        retryable = o.retryable;
+        structured_exception = o.structured_exception;
     }
 
     Exception(Exception && o) noexcept
@@ -84,6 +89,10 @@ public:
         message_format_string = o.message_format_string;
         message_format_string_args = std::move(o.message_format_string_args);
         capture_thread_frame_pointers = std::move(o.capture_thread_frame_pointers);
+        hints = std::move(o.hints);
+        contexts = std::move(o.contexts);
+        retryable = o.retryable;
+        structured_exception = std::move(o.structured_exception);
         Poco::Exception::operator=(std::move(o));
     }
 
@@ -97,6 +106,10 @@ public:
             message_format_string = o.message_format_string;
             message_format_string_args = o.message_format_string_args;
             capture_thread_frame_pointers = o.capture_thread_frame_pointers;
+            hints = o.hints;
+            contexts = o.contexts;
+            retryable = o.retryable;
+            structured_exception = o.structured_exception;
             Poco::Exception::operator=(o);
         }
         return *this;
@@ -113,6 +126,10 @@ public:
             message_format_string = o.message_format_string;
             message_format_string_args = std::move(o.message_format_string_args);
             capture_thread_frame_pointers = std::move(o.capture_thread_frame_pointers);
+            hints = std::move(o.hints);
+            contexts = std::move(o.contexts);
+            retryable = o.retryable;
+            structured_exception = std::move(o.structured_exception);
             Poco::Exception::operator=(std::move(o));
         }
         return *this;
@@ -247,6 +264,27 @@ public:
 
     void addMessage(const MessageMasked & msg_masked);
 
+    template <typename... Args>
+    void addHint(fmt::format_string<Args...> format, Args &&... args)
+    {
+        hints.emplace_back(fmt::format(format, std::forward<Args>(args)...));
+    }
+
+    template <typename... Args>
+    void addContext(fmt::format_string<Args...> format, Args &&... args)
+    {
+        contexts.emplace_back(fmt::format(format, std::forward<Args>(args)...));
+    }
+
+    const std::vector<String> & getHints() const { return hints; }
+    const std::vector<String> & getContexts() const { return contexts; }
+
+    void setRetryable(bool value) { retryable = value; }
+    bool isRetryable() const { return retryable; }
+
+    void setStructuredException(std::shared_ptr<const StructuredException> value) { structured_exception = std::move(value); }
+    const StructuredException * getStructuredException() const { return structured_exception.get(); }
+
     /// Used to distinguish local exceptions from the one that was received from remote node.
     void setRemoteException(bool remote_ = true) { remote = remote_; }
     bool isRemoteException() const { return remote; }
@@ -289,6 +327,10 @@ private:
 protected:
     std::string_view message_format_string;
     std::vector<std::string> message_format_string_args;
+    std::vector<String> hints;
+    std::vector<String> contexts;
+    bool retryable = false;
+    std::shared_ptr<const StructuredException> structured_exception;
     /// Local copy of static per-thread thread_frame_pointers, should be mutable to be unpoisoned on printout
     mutable std::vector<FramePointers> capture_thread_frame_pointers;
 };

@@ -1,0 +1,8 @@
+--- exception before response data
+{"version":1,"code":47,"name":"DB::Exception","code_name":"UNKNOWN_IDENTIFIER","category":"USER_ERROR","query_id":"structured-http-early","query":"SELECT missing_identifier","hints":[],"context":[],"retryable":false}
+--- an unsupported model version keeps the legacy response
+Code: 47
+--- exception after response data
+{"version":1,"name":"DB::Exception","code_name":"FUNCTION_THROW_IF_VALUE_IS_NON_ZERO","query_id":"structured-http-stream","query":"SELECT if(number = 2, throwIf(1), number) FROM numbers(4) FORMAT CSV SETTINGS max_block_size = 1, max_threads = 1","retryable":false}
+--- framed exception is a JSON object
+{"packet":"exception","exception_is_object":true,"version":1,"query_id":"structured-http-framed"}

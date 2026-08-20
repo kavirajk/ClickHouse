@@ -142,6 +142,10 @@ private:
         /// be appended to it anymore (see `trySendExceptionToClient`).
         bool framed = false;
 
+        bool structured_exception = false;
+        String query_id;
+        String query;
+
         bool exception_is_written = false;
         std::function<void(WriteBuffer &, int code, const String &)> exception_writer;
 

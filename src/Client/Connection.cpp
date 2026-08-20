@@ -22,6 +22,7 @@
 #include <Common/logger_useful.h>
 #include <Common/ClickHouseRevision.h>
 #include <Common/Exception.h>
+#include <Common/StructuredException.h>
 #include <Common/NetException.h>
 #include <Common/CurrentMetrics.h>
 #include <Common/DNSResolver.h>
@@ -1760,7 +1761,11 @@ void Connection::setDescription()
 
 std::unique_ptr<Exception> Connection::receiveException() const
 {
-    return std::make_unique<Exception>(readException(*in, "Received from " + getDescription(), true /* remote */));
+    const String additional_message = "Received from " + getDescription();
+    if (server_revision >= DBMS_MIN_REVISION_WITH_STRUCTURED_EXCEPTION)
+        return std::make_unique<Exception>(StructuredException::read(*in).toException(additional_message, true));
+
+    return std::make_unique<Exception>(readException(*in, additional_message, true /* remote */));
 }
 
 

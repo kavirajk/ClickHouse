@@ -49,6 +49,8 @@
 #include <Common/QueryScope.h>
 #include <Common/DateLUTImpl.h>
 #include <Common/Exception.h>
+#include <Common/SensitiveDataMasker.h>
+#include <Common/StructuredException.h>
 #include <Common/LockMemoryExceptionInThread.h>
 #include <Common/NetException.h>
 #include <Common/OpenSSLHelpers.h>
@@ -995,7 +997,7 @@ void TCPHandler::runImpl()
             if (query_state)
                 query_state->io.onException();
             exception = std::make_unique<DB::Exception>(Exception::CreateFromSTDTag{}, e);
-            sendException(*exception, send_exception_with_stack_trace);
+            sendException(*exception, send_exception_with_stack_trace, query_state.get());
             std::abort();
         }
 #endif
@@ -1063,7 +1065,7 @@ void TCPHandler::runImpl()
                 try
                 {
                     std::lock_guard lock(*callback_mutex);
-                    sendException(*exception, send_exception_with_stack_trace);
+                    sendException(*exception, send_exception_with_stack_trace, query_state.get());
                 }
                 catch (...) // NOLINT(bugprone-empty-catch)
                 {
@@ -1116,7 +1118,7 @@ void TCPHandler::runImpl()
                 if (exception_code == ErrorCodes::QUERY_WAS_CANCELLED_BY_CLIENT)
                     sendEndOfStream(*query_state);
                 else
-                    sendException(*exception, send_exception_with_stack_trace);
+                    sendException(*exception, send_exception_with_stack_trace, query_state.get());
             }
             catch (...)
             {
@@ -2368,6 +2370,7 @@ void TCPHandler::sendHello()
     }
 
     out->next();
+    server_hello_sent = true;
 }
 
 
@@ -3223,13 +3226,21 @@ void TCPHandler::sendTableColumns(QueryState & state, const ColumnsDescription &
 }
 
 
-void TCPHandler::sendException(const Exception & e, bool with_stack_trace)
+void TCPHandler::sendException(const Exception & e, bool with_stack_trace, const QueryState * state)
 {
     if (out->isCanceled())
         return;
 
     writeVarUInt(Protocol::Server::Exception, *out);
-    writeException(e, *out, with_stack_trace);
+    if (server_hello_sent && client_tcp_protocol_version >= DBMS_MIN_REVISION_WITH_STRUCTURED_EXCEPTION)
+    {
+        const String query_id = state ? state->query_id : String{};
+        const String query = state
+            ? wipeSensitiveDataAndCutToLength(String(state->query), StructuredException::MAX_QUERY_SIZE, true) : String{};
+        StructuredException::fromException(e, with_stack_trace, query_id, query).write(*out);
+    }
+    else
+        writeException(e, *out, with_stack_trace);
 
     out->finishChunk();
     out->next();
