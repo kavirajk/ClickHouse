@@ -3438,7 +3438,7 @@ std::pair<std::shared_ptr<QueryFuzzer>, std::unique_lock<std::mutex>> getGlobalA
 
 /// Resolve the output format taking into account explicit overrides via `format`/`output_format` settings.
 /// The override wins over the FORMAT clause in the query and over the default format from Context.
-static String resolveOutputFormatName(const ContextPtr & context, const ASTQueryWithOutput * ast_query_with_output)
+String resolveOutputFormatName(const ContextPtr & context, const ASTQueryWithOutput * ast_query_with_output)
 {
     const auto & settings = context->getSettingsRef();
     const String & format_override = settings[Setting::format];

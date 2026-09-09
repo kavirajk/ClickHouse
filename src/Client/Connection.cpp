@@ -988,7 +988,8 @@ void Connection::sendQuery(
     const ClientInfo * client_info,
     bool with_pending_data,
     const std::vector<String> & external_roles,
-    std::function<void(const Progress &)>)
+    std::function<void(const Progress &)>,
+    Protocol::ResultEncoding result_encoding)
 {
     OpenTelemetry::SpanHolder span("Connection::sendQuery()", OpenTelemetry::SpanKind::CLIENT);
     span.addAttribute("clickhouse.query_id", query_id_);
@@ -1025,6 +1026,12 @@ void Connection::sendQuery(
 
     if (!connected)
         connect(timeouts);
+
+    if (result_encoding == Protocol::ResultEncoding::ServerFormatted
+        && server_revision < DBMS_MIN_PROTOCOL_VERSION_WITH_SERVER_FORMATTED_RESULTS)
+        throw Exception(
+            ErrorCodes::SUPPORT_IS_DISABLED,
+            "Server {} does not support server-side output formatting", getDescription());
 
     /// Query is not executed within sendQuery() function.
     ///
@@ -1145,6 +1152,9 @@ void Connection::sendQuery(
 
     writeVarUInt(stage, *out);
     writeVarUInt(static_cast<bool>(compression), *out);
+
+    if (server_revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_SERVER_FORMATTED_RESULTS)
+        writeVarUInt(static_cast<UInt64>(result_encoding), *out);
 
     writeStringBinary(query, *out);
 
@@ -1590,6 +1600,14 @@ Packet Connection::receivePacket()
                 res.block = receiveProfileEvents();
                 return res;
 
+            case Protocol::Server::ResultMetadata:
+                receiveResultMetadata(res);
+                return res;
+
+            case Protocol::Server::FormattedData:
+                res.formatted_data = receiveFormattedData();
+                return res;
+
             case Protocol::Server::TimezoneUpdate:
                 /// Same cap + control-char sanitization as the handshake read; the field
                 /// reaches the client's terminal via the time-zone warning path.
@@ -1629,6 +1647,20 @@ Block Connection::receiveData()
 {
     initBlockInput();
     return receiveDataImpl(*block_in);
+}
+
+void Connection::receiveResultMetadata(Packet & packet)
+{
+    readStringBinary(packet.result_format, *in, DBMS_MAX_HELLO_STRING_SIZE);
+    readStringBinary(packet.content_type, *in, DBMS_MAX_HELLO_STRING_SIZE);
+}
+
+String Connection::receiveFormattedData()
+{
+    initMaybeCompressedInput();
+    String data;
+    readStringBinary(data, *maybe_compressed_in, DEFAULT_MAX_STRING_SIZE);
+    return data;
 }
 
 

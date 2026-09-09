@@ -156,7 +156,8 @@ public:
         const ClientInfo * client_info/* = nullptr */,
         bool with_pending_data/* = false */,
         const std::vector<String> & external_roles,
-        std::function<void(const Progress &)> process_progress_callback) override;
+        std::function<void(const Progress &)> process_progress_callback,
+        Protocol::ResultEncoding result_encoding = Protocol::ResultEncoding::NativeBlocks) override;
 
     void sendQueryPlan(const QueryPlan &) override;
 

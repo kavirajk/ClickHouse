@@ -1184,6 +1184,9 @@ void Client::addExtraOptions(OptionsDescription & options_description)
         ("compression",
             po::value<bool>(),
             "enable or disable compression (enabled by default for remote communication and disabled for localhost communication).")
+        ("server-side-output-format",
+            po::bool_switch(),
+            "Ask the server to serialize query results in the requested output format.")
         ("query-fuzzer-runs",
             po::value<int>()->default_value(0),
             "After executing every SELECT query, do random mutations in it and run again specified number of times. This is used for "
@@ -1494,6 +1497,7 @@ void Client::processConfig()
         if (client_context)
             client_context->setSetting("database", default_database);
     }
+    use_server_side_output_format = config().getBool("server-side-output-format", false);
     inline_insert_data = config().getBool("inline-insert-data", false);
 
     if (inline_insert_data)

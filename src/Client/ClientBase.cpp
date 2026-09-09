@@ -857,6 +857,91 @@ void ClientBase::onData(Block & block, ASTPtr parsed_query)
 }
 
 
+void ClientBase::onResultMetadata(const String & format, const String &)
+{
+    if (server_formatted_output_initialized)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Received duplicate server-formatted result metadata");
+
+    server_formatted_output_initialized = true;
+    WriteBuffer * underlying_buf = std_out.get();
+
+    if (!pager.empty() && !isEmbeeddedClient())
+    {
+        if (SIG_ERR == signal(SIGPIPE, SIG_IGN))
+            throw ErrnoException(ErrorCodes::CANNOT_SET_SIGNAL_HANDLER, "Cannot set signal handler for output pager");
+        if (SIG_ERR == signal(SIGQUIT, SIG_IGN))
+            throw ErrnoException(ErrorCodes::CANNOT_SET_SIGNAL_HANDLER, "Cannot set signal handler for output pager");
+
+        ShellCommand::Config config(pager);
+        config.pipe_stdin_only = true;
+        config.terminate_in_destructor_strategy.terminate_in_destructor = true;
+        config.terminate_in_destructor_strategy.termination_signal = SIGTERM;
+        pager_cmd = ShellCommand::execute(config);
+        underlying_buf = &pager_cmd->in;
+    }
+
+    std_out_wrapper = std::make_unique<FlushCallbackWriteBuffer>(
+        underlying_buf,
+        [this]()
+        {
+            if (need_render_progress && tty_buf)
+            {
+                std::unique_lock lock(tty_mutex);
+                progress_indication.clearProgressOutput(*tty_buf, lock);
+            }
+            if (need_render_progress_table && tty_buf)
+            {
+                std::unique_lock lock(tty_mutex);
+                progress_table.clearTableOutput(*tty_buf, lock);
+            }
+        });
+
+    if (default_output_compression_method != CompressionMethod::None)
+        out_file_buf = wrapWriteBufferWithCompressionMethod(
+            std_out_wrapper.get(), default_output_compression_method, 3, 0,
+            client_context->getSettingsRef()[Setting::snappy_mode]);
+
+    if (stdout_is_a_tty && stdin_is_a_tty && !FormatFactory::instance().checkIfOutputFormatIsTTYFriendly(format))
+    {
+        stopKeystrokeInterceptorIfExists();
+        SCOPE_EXIT({ startKeystrokeInterceptorIfExists(); });
+
+        const auto question = fmt::format(
+            "The requested output format `{}` is binary and could produce side-effects when output directly into the terminal.\n"
+            "Redirect the output of the shell command to a file to use it safely.\n"
+            "Do you want to output it anyway? [y/N] ",
+            format);
+        if (!ask(question, *std_in, *std_out))
+            discard_server_formatted_output = true;
+        *std_out << '\n';
+    }
+}
+
+
+void ClientBase::onFormattedData(const String & data)
+{
+    if (!server_formatted_output_initialized)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Received formatted result data before its metadata");
+    if (discard_server_formatted_output)
+        return;
+
+    WriteBuffer & result_out = out_file_buf ? *out_file_buf : *std_out_wrapper;
+    result_out.write(data.data(), data.size());
+    result_out.next();
+
+    if (need_render_progress && tty_buf)
+    {
+        std::unique_lock lock(tty_mutex);
+        progress_indication.writeProgress(*tty_buf, lock);
+    }
+    if (need_render_progress_table && tty_buf && !cancelled)
+    {
+        std::unique_lock lock(tty_mutex);
+        progress_table.writeTable(*tty_buf, lock, progress_table_toggle_on.load(), progress_table_toggle_enabled, false);
+    }
+}
+
+
 void ClientBase::onLogData(Block & block)
 {
     initLogsOutputStream();
@@ -1794,6 +1879,41 @@ void ClientBase::processOrdinaryQuery(String query, ASTPtr parsed_query)
     const auto settings_without_compat = settingsWithoutCompatibilityDerived();
     const Settings * settings_to_send = settings_without_compat ? &*settings_without_compat : &settings;
 
+    Protocol::ResultEncoding result_encoding = Protocol::ResultEncoding::NativeBlocks;
+    std::optional<Settings> server_format_settings;
+    if (use_server_side_output_format)
+    {
+        if (connection->getConnectionType() != IServerConnection::Type::SERVER)
+            throw Exception(
+                ErrorCodes::SUPPORT_IS_DISABLED,
+                "Server-side output formatting requires a TCP server connection");
+        if (query_processing_stage != QueryProcessingStage::Complete)
+            throw Exception(
+                ErrorCodes::BAD_ARGUMENTS,
+                "Server-side output formatting requires the Complete query processing stage");
+
+        const auto * query_with_output = dynamic_cast<const ASTQueryWithOutput *>(parsed_query.get());
+        if (query_with_output && query_with_output->out_file)
+            throw Exception(
+                ErrorCodes::BAD_ARGUMENTS,
+                "Server-side output formatting does not support INTO OUTFILE; redirect the client output instead");
+
+        server_format_settings.emplace(*settings_to_send);
+        if (has_vertical_output_suffix)
+            server_format_settings->set("output_format", "Vertical");
+        else if (query_with_output && query_with_output->format_ast)
+            server_format_settings->set(
+                "output_format",
+                query_with_output->format_ast->as<ASTIdentifier &>().name());
+        else if (server_format_settings->get("output_format").safeGet<String>().empty()
+            && server_format_settings->get("format").safeGet<String>().empty())
+            server_format_settings->set("output_format", default_output_format);
+
+        settings_to_send = &*server_format_settings;
+        result_encoding = Protocol::ResultEncoding::ServerFormatted;
+    }
+
+
     int retries_left = 10;
     while (retries_left)
     {
@@ -1824,7 +1944,8 @@ void ClientBase::processOrdinaryQuery(String query, ASTPtr parsed_query)
                         &client_context->getClientInfo(),
                         true,
                         {},
-                        [&](const Progress & progress) { onProgress(progress); });
+                        [&](const Progress & progress) { onProgress(progress); },
+                        result_encoding);
                 });
 
                 if (send_external_tables)
@@ -1983,6 +2104,16 @@ bool ClientBase::receiveAndProcessPacket(ASTPtr parsed_query, bool cancelled_)
         case Protocol::Server::Data:
             if (!cancelled_)
                 onData(packet.block, parsed_query);
+            return true;
+
+        case Protocol::Server::ResultMetadata:
+            if (!cancelled_)
+                onResultMetadata(packet.result_format, packet.content_type);
+            return true;
+
+        case Protocol::Server::FormattedData:
+            if (!cancelled_)
+                onFormattedData(packet.formatted_data);
             return true;
 
         case Protocol::Server::Progress:
@@ -2248,6 +2379,8 @@ void ClientBase::resetOutput()
 
     output_format.reset();
     pending_progress.reset();
+    server_formatted_output_initialized = false;
+    discard_server_formatted_output = false;
 
     /// out_file_buf wraps std_out_wrapper (via a raw pointer), so it must be finalized
     /// first to flush remaining data (e.g. the gzip footer) into std_out_wrapper.

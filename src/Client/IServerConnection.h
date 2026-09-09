@@ -37,6 +37,9 @@ struct Packet
     String columns_description;
     Progress progress;
     ProfileInfo profile_info;
+    String result_format;
+    String content_type;
+    String formatted_data;
 
     /// The part of parallel replicas protocol
     std::optional<InitialAllRangesAnnouncement> announcement;
@@ -102,7 +105,8 @@ public:
         const ClientInfo * client_info,
         bool with_pending_data,
         const std::vector<String> & external_roles,
-        std::function<void(const Progress &)> process_progress_callback) = 0;
+        std::function<void(const Progress &)> process_progress_callback,
+        Protocol::ResultEncoding result_encoding = Protocol::ResultEncoding::NativeBlocks) = 0;
 
     virtual void sendQueryPlan(const QueryPlan & query_plan) = 0;
 

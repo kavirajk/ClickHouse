@@ -77,6 +77,7 @@ struct QueryState
 
     QueryProcessingStage::Enum stage = QueryProcessingStage::Complete;
     Protocol::Compression compression = Protocol::Compression::Disable;
+    Protocol::ResultEncoding result_encoding = Protocol::ResultEncoding::NativeBlocks;
 
     /// A queue with internal logs that will be passed to client. It must be
     /// destroyed after input/output blocks, because they may contain other
@@ -335,6 +336,8 @@ private:
 
     void sendHello();
     void sendData(QueryState & state, const Block & block); /// Write a block to the network.
+    void sendResultMetadata(const String & format, const String & content_type);
+    void sendFormattedData(QueryState & state, std::string_view data);
     static void sendLogData(QueryState & state, const Block & block, std::shared_ptr<TCPHandlerPocoChunkedWriter> out, UInt32 client_tcp_protocol_version);
     void sendTableColumns(QueryState & state, const ColumnsDescription & columns);
     void sendException(const Exception & e, bool with_stack_trace);

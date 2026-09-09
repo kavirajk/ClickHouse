@@ -21,6 +21,7 @@
 #include <Formats/FormatFactory.h>
 #include <Formats/NativeReader.h>
 #include <Formats/NativeWriter.h>
+#include <IO/BufferWithOwnMemory.h>
 #include <IO/LimitReadBuffer.h>
 #include <IO/Progress.h>
 #include <IO/ReadHelpers.h>
@@ -38,6 +39,7 @@
 #include <Interpreters/Context.h>
 #include <Parsers/ASTCreateQuery.h>
 #include <Parsers/ASTInsertQuery.h>
+#include <Parsers/ASTQueryWithOutput.h>
 #include <Server/TCPServer.h>
 #include <Storages/ObjectStorage/StorageObjectStorageCluster.h>
 #include <Storages/StorageReplicatedMergeTree.h>
@@ -69,6 +71,7 @@
 #include <Processors/Executors/PullingAsyncPipelineExecutor.h>
 #include <Processors/Executors/PushingAsyncPipelineExecutor.h>
 #include <Processors/Executors/PushingPipelineExecutor.h>
+#include <Processors/Formats/IOutputFormat.h>
 #include <Processors/QueryPlan/QueryPlan.h>
 
 #if USE_SSL
@@ -201,6 +204,25 @@ namespace DB::ErrorCodes
 
 namespace
 {
+class FormattedDataWriteBuffer final : public BufferWithOwnMemory<WriteBuffer>
+{
+public:
+    explicit FormattedDataWriteBuffer(std::function<void(std::string_view)> callback_)
+        : BufferWithOwnMemory<WriteBuffer>(DBMS_DEFAULT_BUFFER_SIZE)
+        , callback(std::move(callback_))
+    {
+    }
+
+private:
+    void nextImpl() override
+    {
+        if (offset())
+            callback(std::string_view(working_buffer.begin(), offset()));
+    }
+
+    std::function<void(std::string_view)> callback;
+};
+
 // This function corrects the wrong client_name from the old client.
 // Old clients 28.7 and some intermediate versions of 28.7 were sending different ClientInfo.client_name
 // "ClickHouse client" was sent with the hello message.
@@ -1601,15 +1623,30 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
     const bool discard_query_data = state.query_context->getSettingsRef()[Setting::discard_query_data]
         && state.query_context->getClientInfo().query_kind == ClientInfo::QueryKind::INITIAL_QUERY;
 
-    /// Send header-block, to allow client to prepare output format for data to send.
-    {
-        const auto & header = pipeline.getHeader();
+    const bool server_formatted = state.result_encoding == Protocol::ResultEncoding::ServerFormatted;
+    const auto & header = pipeline.getHeader();
 
-        if (!header.empty())
-        {
-            sendData(state, header);
-            out->sync();
-        }
+    std::unique_ptr<FormattedDataWriteBuffer> formatted_buffer;
+    OutputFormatPtr output_format;
+
+    if (server_formatted)
+    {
+        const auto * query_with_output = dynamic_cast<const ASTQueryWithOutput *>(state.parsed_query.get());
+        const String format = resolveOutputFormatName(state.query_context, query_with_output);
+        formatted_buffer = std::make_unique<FormattedDataWriteBuffer>(
+            [this, &state](std::string_view data) { sendFormattedData(state, data); });
+        output_format = FormatFactory::instance().getOutputFormat(
+            format, *formatted_buffer, header, state.query_context);
+        output_format->setAutoFlush();
+
+        sendResultMetadata(format, FormatFactory::instance().getContentType(format, std::nullopt));
+        out->sync();
+    }
+    else if (!header.empty())
+    {
+        /// Send a header block so a block-mode client can prepare its local output format.
+        sendData(state, header);
+        out->sync();
     }
 
     {
@@ -1646,9 +1683,16 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
                     else
                         sendLogs(state);
 
-                    // Block might be empty in case of timeout, i.e. there is no data to process
+                    /// A block can be empty after the timed pull expires.
                     if (!block.empty() && !state.io.null_format && !discard_query_data)
-                        sendData(state, block);
+                    {
+                        if (server_formatted)
+                            output_format->write(materializeBlock(
+                                block,
+                                !output_format->supportsSpecialSerializationKinds()));
+                        else
+                            sendData(state, block);
+                    }
 
                     out->sync();
                 }
@@ -1672,18 +1716,45 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
         std::lock_guard lock(*callback_mutex);
 
         receivePacketsExpectCancel(state);
+        const Block totals = executor.getTotalsBlock();
+        const Block extremes = executor.getExtremesBlock();
+        const ProfileInfo profile_info = executor.getProfileInfo();
 
-        if (!discard_query_data)
+        if (server_formatted)
         {
-            sendTotals(state, executor.getTotalsBlock());
-            sendExtremes(state, executor.getExtremesBlock());
+            if (!discard_query_data)
+            {
+                if (!totals.empty())
+                    output_format->setTotals(materializeBlock(
+                        totals,
+                        !output_format->supportsSpecialSerializationKinds()));
+                if (!extremes.empty())
+                    output_format->setExtremes(materializeBlock(
+                        extremes,
+                        !output_format->supportsSpecialSerializationKinds()));
+            }
+
+            if (profile_info.hasAppliedLimit())
+                output_format->setRowsBeforeLimit(profile_info.getRowsBeforeLimit());
+            if (profile_info.hasAppliedAggregation())
+                output_format->setRowsBeforeAggregation(profile_info.getRowsBeforeAggregation());
+
+            output_format->finalize();
+            formatted_buffer->finalize();
         }
-        sendProfileInfo(state, executor.getProfileInfo());
+        else if (!discard_query_data)
+        {
+            sendTotals(state, totals);
+            sendExtremes(state, extremes);
+        }
+
+        sendProfileInfo(state, profile_info);
         sendProgress(state);
         sendLogs(state);
         sendSelectProfileEvents(state);
 
-        sendData(state, {});
+        if (!server_formatted)
+            sendData(state, {});
 
         sendProgress(state);
     }
@@ -2552,6 +2623,7 @@ void TCPHandler::processQuery(std::shared_ptr<QueryState> & state)
 {
     UInt64 stage = 0;
     UInt64 compression = 0;
+    UInt64 result_encoding = 0;
 
     chassert(!state);
     state = std::make_shared<QueryState>();
@@ -2637,6 +2709,25 @@ void TCPHandler::processQuery(std::shared_ptr<QueryState> & state)
             compression);
     state->compression = static_cast<Protocol::Compression>(compression);
     last_block_in.compression = state->compression;
+
+    if (client_tcp_protocol_version >= DBMS_MIN_PROTOCOL_VERSION_WITH_SERVER_FORMATTED_RESULTS)
+    {
+        readVarUInt(result_encoding, *in);
+        if (result_encoding > static_cast<UInt64>(Protocol::ResultEncoding::ServerFormatted))
+            throw Exception(
+                ErrorCodes::INCORRECT_DATA,
+                "Unknown result encoding: {}",
+                result_encoding);
+        state->result_encoding = static_cast<Protocol::ResultEncoding>(result_encoding);
+    }
+
+    if (state->result_encoding == Protocol::ResultEncoding::ServerFormatted
+        && (state->stage != QueryProcessingStage::Complete
+            || is_interserver_mode
+            || client_info.query_kind != ClientInfo::QueryKind::INITIAL_QUERY))
+        throw Exception(
+            ErrorCodes::BAD_ARGUMENTS,
+            "Server-side output formatting requires an initial query executed to the Complete stage");
 
     readStringBinary(state->query, *in);
 
@@ -2887,6 +2978,9 @@ void TCPHandler::processUnexpectedQuery()
 
     readVarUInt(skip_uint_64, *in);
     last_block_in.compression = static_cast<Protocol::Compression>(skip_uint_64);
+
+    if (client_tcp_protocol_version >= DBMS_MIN_PROTOCOL_VERSION_WITH_SERVER_FORMATTED_RESULTS)
+        readVarUInt(skip_uint_64, *in);
 
     readStringBinary(skip_string, *in);
 
@@ -3199,6 +3293,27 @@ void TCPHandler::receivePacketsExpectCancel(QueryState & state, bool force)
             throw;
         }
     }
+}
+
+void TCPHandler::sendResultMetadata(const String & format, const String & content_type)
+{
+    writeVarUInt(Protocol::Server::ResultMetadata, *out);
+    writeStringBinary(format, *out);
+    writeStringBinary(content_type, *out);
+    out->finishChunk();
+}
+
+void TCPHandler::sendFormattedData(QueryState & state, std::string_view data)
+{
+    if (data.empty())
+        return;
+
+    initMaybeCompressedOut(state);
+    writeVarUInt(Protocol::Server::FormattedData, *out);
+    writeStringBinary(data, *state.maybe_compressed_out);
+    if (state.maybe_compressed_out != out)
+        state.maybe_compressed_out->next();
+    out->finishChunk();
 }
 
 void TCPHandler::sendData(QueryState & state, const Block & block)

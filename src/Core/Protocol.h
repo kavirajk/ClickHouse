@@ -97,7 +97,9 @@ namespace Protocol
             MergeTreeReadTaskRequest = 16,  /// Request from a MergeTree replica to a coordinator
             TimezoneUpdate = 17,            /// Receive server's (session-wide) default timezone
             SSHChallenge = 18,              /// Return challenge for SSH signature signing
-            MAX = SSHChallenge,
+            ResultMetadata = 19,             /// Format name and content type for server-formatted query results.
+            FormattedData = 20,              /// A length-delimited fragment of a server-formatted query result.
+            MAX = FormattedData,
 
         };
 
@@ -150,6 +152,13 @@ namespace Protocol
     {
         Disable = 0,
         Enable = 1,
+    };
+
+    /// Representation requested for the main query result on this connection hop.
+    enum class ResultEncoding : uint8_t
+    {
+        NativeBlocks = 0,
+        ServerFormatted = 1,
     };
 
     /// Whether the ssl must be used.

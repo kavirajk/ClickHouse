@@ -289,6 +289,8 @@ private:
     void onProgress(const Progress & value);
     void onTimezoneUpdate(const String & tz);
     void onData(Block & block, ASTPtr parsed_query);
+    void onResultMetadata(const String & format, const String & content_type);
+    void onFormattedData(const String & data);
     void onLogData(Block & block);
     void onTotals(Block & block, ASTPtr parsed_query);
     void onExtremes(Block & block, ASTPtr parsed_query);
@@ -428,6 +430,9 @@ protected:
 
     String default_output_format; /// Query results output format.
     CompressionMethod default_output_compression_method = CompressionMethod::None;
+    bool use_server_side_output_format = false;
+    bool server_formatted_output_initialized = false;
+    bool discard_server_formatted_output = false;
     String default_input_format; /// Tables' format for clickhouse-local.
     CompressionMethod default_input_compression_method = CompressionMethod::None;
 

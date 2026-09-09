@@ -21,6 +21,7 @@ class IInterpreter;
 class ReadBuffer;
 class WriteBuffer;
 class IOutputFormat;
+class ASTQueryWithOutput;
 struct QueryStatusInfo;
 struct QueryPlanAndSets;
 
@@ -107,6 +108,8 @@ std::pair<ASTPtr, BlockIO> executeQuery(
     QueryFlags flags = {},
     QueryProcessingStage::Enum stage = QueryProcessingStage::Complete    /// To which stage the query must be executed.
 );
+
+String resolveOutputFormatName(const ContextPtr & context, const ASTQueryWithOutput * ast_query_with_output);
 
 void executeQueryInBackground(std::string_view query, const ASTPtr & ast, ContextMutablePtr context);
 

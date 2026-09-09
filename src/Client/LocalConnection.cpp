@@ -186,8 +186,14 @@ void LocalConnection::sendQuery(
     const ClientInfo * client_info,
     bool,
     const std::vector<String> & /*external_roles*/,
-    std::function<void(const Progress &)> process_progress_callback)
+    std::function<void(const Progress &)> process_progress_callback,
+    Protocol::ResultEncoding result_encoding)
 {
+    if (result_encoding != Protocol::ResultEncoding::NativeBlocks)
+        throw Exception(
+            ErrorCodes::SUPPORT_IS_DISABLED,
+            "Server-side output formatting is available only with a TCP server connection");
+
     /// Last query may not have been finished or cancelled due to exception on client side.
     if (state && !state->is_finished && !state->is_cancelled)
         sendCancel();
