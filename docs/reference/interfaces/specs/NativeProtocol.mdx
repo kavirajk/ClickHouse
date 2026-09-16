@@ -28,7 +28,7 @@ A few properties hold throughout. The protocol is binary and positional: there a
 | Encoding         | Binary and positional (no field tags except in `BlockInfo`) |
 | Connection model | Stateful, one query at a time, no multiplexing |
 | Versioning       | Negotiated at handshake; individual features gated by version |
-| Data format      | The [Native Format](/reference/interfaces/specs/NativeFormat) for all tabular data |
+| Data format      | Native blocks by default; arbitrary server-formatted byte streams when explicitly requested |
 
 Every message on the wire starts with a `VarUInt` packet type code, followed by a body whose shape depends on that code and on the negotiated protocol version.
 
@@ -64,7 +64,7 @@ sequenceDiagram
     end
 ```
 
-The native TCP protocol always carries tabular data in the Native format, regardless of any `FORMAT` clause in the SQL. Re-formatting into `RowBinary`, `CSV`, `JSON`, and so on is the client's job, done after it decodes the Native blocks. (The HTTP interface is a different code path that *does* honour the `FORMAT` clause; HTTP is out of scope here.)
+By default the native TCP protocol carries tabular results as Native blocks, and the client handles a trailing `FORMAT` clause after decoding those blocks. From protocol version `54493`, a client can explicitly request server-formatted output instead. The server then resolves the effective output format, sends `ResultMetadata`, and streams opaque `FormattedData` packets. This opt-in mode is described in [server-formatted query results](#server-formatted-query-results).
 
 ## Security {#security}
 
@@ -159,6 +159,7 @@ When a feature is active, its fields **must** be present on the wire. The protoc
 | HTTP_HANDLER_IN_CLIENT_INFO     | 54490   | ClientInfo             | Adds `http_handler_name` and `http_request_url` (both `String`) to the **HTTP** branch of ClientInfo, immediately after `http_referer`. They carry the name of the matched SQL-defined HTTP handler and the request URL, so that `currentHandler`/`currentRequestURL` and the `http_handler_name`/`http_request_url` `system.query_log` columns stay populated on remote shards for distributed handler queries. Written only when `query_interface = HTTP` (empty strings for a non-handler HTTP query); required once negotiated version ≥ 54490 — omitting it desynchronizes the rest of the Query packet. |
 | QUANTILE_DETERMINISTIC_SKIP_DEGREE | 54491 | Block (Column) | Bumps the state version of `AggregateFunction(quantileDeterministic, ...)` (and the `quantiles`/`median` spellings of it) from `0` to `1`, which appends a trailing `UInt8 skip_degree` to each serialized state. Only the state payload of that one aggregate function changes; the column framing is untouched, and every other aggregate function keeps its own version. Below this revision the writer emits version `0` states, so an older peer is unaffected. |
 | STRING_WITH_SIZE_STREAM_SERIALIZATION | 54492 | Block (Column)         | `String` columns switch from the per-value length-prefixed layout to a separate stream of cumulative byte offsets (the same offsets layout an `Array` uses), sent as-is: `[UInt64 × num_rows offsets][data blob]`. Gated on the negotiated revision; below 54492 the writer uses the per-value length prefixes. The wire carries no per-column marker for this — both peers derive it from the revision alone. See [String column layout](/reference/interfaces/specs/NativeFormat#string-type). |
+| SERVER_FORMATTED_RESULTS        | 54493   | Query, result packets  | Adds the trailing `result_encoding` field to `Query`. `0` requests Native `Data` blocks; `1` requests `ResultMetadata` followed by opaque `FormattedData` packets. Also defines the compatibility client packet `QueryWithServerFormattedResult` (`15`) for clients that intentionally retain a pre-`54493` Query body layout. |
 
 ## Packet envelope {#packet-envelope}
 
@@ -359,6 +360,8 @@ On error at any point the server sends an `Exception` instead of `EndOfStream`, 
    | `Log` (10)            | Server log line. |
    | `TableColumns` (11)   | Column-defaults metadata. |
    | `ProfileEvents` (14)  | Performance counters. |
+   | `ResultMetadata` (19) | In server-formatted mode, consume the format name and content type before any payload bytes. |
+   | `FormattedData` (20)  | In server-formatted mode, append the length-delimited payload bytes verbatim; the body follows query compression. |
    | `Exception` (2)       | Decode and return as error. Exit the loop and return to `READY`. |
    | anything else         | Unexpected during the query phase. Terminate the connection. |
 
@@ -367,6 +370,30 @@ On `EndOfStream` or a handled `Exception` the connection returns to `READY`. A p
 <Note>
 The `num_rows == 0` case trips up new implementations. A zero-row block is a boundary marker or schema header, not an end-of-stream signal. Only `EndOfStream` or `Exception` ends the response.
 </Note>
+
+### Server-formatted query results {#server-formatted-query-results}
+
+With `SERVER_FORMATTED_RESULTS` (v54493), a client can request arbitrary server-side output formatting without implementing the selected format locally. The normal `Query` packet sets `result_encoding = 1`; `output_format` in the query settings selects the format when the SQL has no trailing `FORMAT` clause. The server sends no Native schema or result `Data` packets in this mode.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    C->>S: Query (`result_encoding = 1`)
+    C->>S: Empty Data marker
+    S->>C: ResultMetadata (`format`, `content_type`)
+    loop formatted output
+        S->>C: FormattedData (opaque bytes)
+        S->>C: Progress / Log / ProfileEvents (may interleave)
+    end
+    S->>C: EndOfStream or Exception
+```
+
+Each `FormattedData` body is one `String`; its bytes are an arbitrary fragment, not necessarily a complete row or record. Clients must concatenate fragments in arrival order and must continue dispatching interleaved control packets. When the Query compression flag is enabled, only the `FormattedData` body is read through the negotiated compression stream; the packet type remains outside that compression frame, matching `Data`. `Exception` remains a separate packet and is never embedded into the formatted byte stream.
+
+`QueryWithServerFormattedResult` (client packet `15`) provides a deliberately narrow compatibility route for clients whose latest fully implemented revision predates `54493`. It is accepted only when the client advertised a revision below `54493`; its body is exactly the legacy `Query` body for that negotiated revision, with no trailing `result_encoding`, and it implicitly selects server-formatted output. A server rejects packet `15` from a client advertising revision `54493` or newer, so a current client has one canonical encoding and cannot accidentally send an ambiguous body. This packet exists to avoid advertising intermediate protocol features that a client has not implemented.
+
+The mode applies only to the final result on this connection hop. Distributed secondary queries remain block-oriented. It does not add arbitrary-format input: client-to-server `Data` packets, including `INSERT` rows, still contain Native blocks.
 
 ### INSERT phase {#insert-phase}
 
@@ -524,8 +551,13 @@ Client → Server.
 | 4 | auth_hash      | String      | inter-server | INTERSERVER_SECRET (v54441)              | Inter-server authentication hash — **not** the raw cluster secret. See [Inter-server authentication](#inter-server-authentication) below. External clients (and any `InitialQuery`) send an empty string. |
 | 5 | stage          | VarUInt     | universal    | always                                   | Query processing stage. `0` = FetchColumns, `1` = WithMergeableState, `2` = Complete, `3` = WithMergeableStateAfterAggregation, `4` = WithMergeableStateAfterAggregationAndLimit, `7` = QueryPlan. Values `3`/`4` appear in distributed queries; `7` accompanies a serialized query plan. External clients normally send `2`. |
 | 6 | compression    | VarUInt     | universal    | always                                   | 0 = disabled, 1 = enabled |
-| 7 | query_body     | String      | universal    | always                                   | SQL text |
-| 8 | parameters     | Parameter[] | client       | PARAMETERS (v54459)                      | See [Parameter](#parameter). Terminated by empty key. |
+| 7 | result_encoding | VarUInt    | client       | SERVER_FORMATTED_RESULTS (v54493)         | `0` = Native blocks; `1` = server-formatted byte stream. External clients should send one of these defined values. |
+| 8 | query_body     | String      | universal    | always                                   | SQL text |
+| 9 | parameters     | Parameter[] | client       | PARAMETERS (v54459)                      | See [Parameter](#parameter). Terminated by empty key. |
+
+### QueryWithServerFormattedResult (packet type 15) {#querywithserverformattedresult}
+
+Client → Server. This compatibility packet is accepted only when the client advertised a protocol revision below `54493`. Its body is exactly the [`Query`](#query) body defined by that older negotiated revision, so field 7 (`result_encoding`) is absent and `query_body` immediately follows `compression`. Receiving packet `15` implicitly selects `ServerFormatted`. A server rejects this packet from clients advertising revision `54493` or newer; those clients use packet `1` and its explicit field 7.
 
 ### ClientInfo (embedded in Query) {#clientinfo}
 
@@ -769,6 +801,25 @@ Server → Client, gated by `COLUMN_DEFAULTS_METADATA` (v54410). The server send
 At negotiated version ≥ 54481 (`COMPRESSED_LOGS_PROFILE_EVENTS_COLUMNS`) the server writes **both** fields through the same optionally-compressed output path, so when the query has `compression = true` the whole `TableColumns` body (`external_table` + `columns_description`) is inside the [compression frame](/reference/interfaces/specs/NativeFormat#compression-frame); the client reads it through the matching decompressed stream. When the query has no compression, the body is on the wire uncompressed exactly as the table above shows. This matters for `INSERT` schema responses: a client that switches compression handling for `Log` and `ProfileEvents` but not `TableColumns` will misread the response when query compression is enabled.
 </Info>
 
+### ResultMetadata (packet type 19) {#resultmetadata}
+
+Server to Client. Sent exactly once before any `FormattedData` for a server-formatted result.
+
+| # | Field | Type | Description |
+|---|-------|------|-------------|
+| 1 | format | String | Effective ClickHouse output format name |
+| 2 | content_type | String | MIME content type selected for the format |
+
+### FormattedData (packet type 20) {#formatteddata}
+
+Server to Client. Carries one opaque fragment of the selected output format.
+
+| # | Field | Type | Description |
+|---|-------|------|-------------|
+| 1 | data | String | Arbitrary format bytes; concatenate successive packet payloads verbatim |
+
+When Query field `compression` is `1`, the body is inside the negotiated compression framing. Empty fragments are not sent.
+
 ### TimezoneUpdate (packet type 17) {#timezoneupdate}
 
 Server → Client, gated by `TIMEZONE_UPDATES` (v54464). Sent in exactly one place: the initializer for the `input` table function (a query of the form `INSERT INTO <table> SELECT ... FROM input('<structure>')`, which streams rows from the client). Right after the server sends the input-schema `Data` block (see the [INSERT phase](#insert-phase)), it emits `TimezoneUpdate` carrying the query context's current `session_timezone` so the client parses the rows it is about to send with the same timezone. The server does **not** emit this packet for arbitrary mid-query `SET session_timezone` changes, nor to tell the client how to format later result blocks.
@@ -910,6 +961,7 @@ Below version `8` the announcement is fire-and-forget regardless of mode, and th
 | 12   | SSHChallengeResponse      | [SSH auth](#ssh-authentication) | SSH auth challenge response |
 | 13   | QueryPlan                 | [QueryPlan](#queryplan) | Query plan |
 | 14   | MergeTreeAllRangesAnnouncementResponse | [MergeTreeAllRangesAnnouncementResponse](#mergetreeallrangesannouncementresponse) | Initiator's reply to a follower's [`MergeTreeAllRangesAnnouncement`](#packet-type-reference) (gated on `parallel_replicas_protocol_version ≥ 8` — see [VERSIONED_PARALLEL_REPLICAS_PROTOCOL](#feature-table)). Inter-server only — external clients never send. |
+| 15   | QueryWithServerFormattedResult | [Query](#query) | Legacy Query body with implicit server-formatted output; valid only when the client-advertised revision is below `54493`. |
 
 ### Server → Client {#server-to-client}
 
@@ -934,6 +986,8 @@ Below version `8` the announcement is fire-and-forget regardless of mode, and th
 | 16   | MergeTreeReadTaskRequest       | not specified       | Parallel read task assignment |
 | 17   | TimezoneUpdate                 | [TimezoneUpdate](#timezoneupdate) | Server timezone update |
 | 18   | SSHChallenge                   | [SSH auth](#ssh-authentication) | SSH auth challenge |
+| 19   | ResultMetadata                 | [ResultMetadata](#resultmetadata) | Announces the effective server-side output format |
+| 20   | FormattedData                  | [FormattedData](#formatteddata) | Opaque fragment of a server-formatted query result |
 
 ### QueryPlan {#queryplan}
 

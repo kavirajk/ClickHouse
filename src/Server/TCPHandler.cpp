@@ -1310,7 +1310,15 @@ bool TCPHandler::receivePacketsExpectQuery(std::shared_ptr<QueryState> & state)
             processObsoleteIgnoredPartUUIDs();
 
         case Protocol::Client::Query:
-            processQuery(state);
+            processQuery(state, false);
+            return true;
+        case Protocol::Client::QueryWithServerFormattedResult:
+            if (client_tcp_protocol_version >= DBMS_MIN_PROTOCOL_VERSION_WITH_SERVER_FORMATTED_RESULTS)
+                throw Exception(
+                    ErrorCodes::INCORRECT_DATA,
+                    "QueryWithServerFormattedResult is only valid for clients using a protocol revision older than {}",
+                    DBMS_MIN_PROTOCOL_VERSION_WITH_SERVER_FORMATTED_RESULTS);
+            processQuery(state, true);
             return true;
 
         default:
@@ -1356,6 +1364,7 @@ bool TCPHandler::receivePacketsExpectData(QueryState & state)
         switch (packet_type)
         {
             case Protocol::Client::Query:
+            case Protocol::Client::QueryWithServerFormattedResult:
                 processUnexpectedQuery();
 
             case Protocol::Client::Hello:
@@ -2619,7 +2628,7 @@ void TCPHandler::processClusterNameAndSalt()
 }
 
 
-void TCPHandler::processQuery(std::shared_ptr<QueryState> & state)
+void TCPHandler::processQuery(std::shared_ptr<QueryState> & state, bool force_server_formatted)
 {
     UInt64 stage = 0;
     UInt64 compression = 0;
@@ -2720,6 +2729,8 @@ void TCPHandler::processQuery(std::shared_ptr<QueryState> & state)
                 result_encoding);
         state->result_encoding = static_cast<Protocol::ResultEncoding>(result_encoding);
     }
+    else if (force_server_formatted)
+        state->result_encoding = Protocol::ResultEncoding::ServerFormatted;
 
     if (state->result_encoding == Protocol::ResultEncoding::ServerFormatted
         && (state->stage != QueryProcessingStage::Complete

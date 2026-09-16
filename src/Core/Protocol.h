@@ -140,7 +140,11 @@ namespace Protocol
                                             /// Initiator's reply to a follower's announcement,
                                             /// carrying the authoritative parts list for the stream.
 
-            MAX = MergeTreeAllRangesAnnouncementResponse,
+            QueryWithServerFormattedResult = 15,
+                                            /// Compatibility query packet for clients whose latest fully
+                                            /// implemented protocol revision predates `ResultEncoding`.
+
+            MAX = QueryWithServerFormattedResult,
         };
 
         /// See the note on Server::toString: returns the numeric value for out-of-range packets.
