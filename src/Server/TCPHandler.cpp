@@ -1642,12 +1642,21 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
     {
         const auto * query_with_output = dynamic_cast<const ASTQueryWithOutput *>(state.parsed_query.get());
         const String format = resolveOutputFormatName(state.query_context, query_with_output);
+        /// With parallel formatting, the buffer is flushed from the collector thread, so the callback
+        /// takes `callback_mutex` itself. Calls into `output_format` must therefore be made without
+        /// holding `callback_mutex`: `write` can block until the collector has flushed a segment.
         formatted_buffer = std::make_unique<FormattedDataWriteBuffer>(
-            [this, &state](std::string_view data) { sendFormattedData(state, data); });
-        output_format = FormatFactory::instance().getOutputFormat(
+            [this, &state](std::string_view data)
+            {
+                std::lock_guard lock(*callback_mutex);
+                sendFormattedData(state, data);
+                out->sync();
+            });
+        output_format = FormatFactory::instance().getOutputFormatParallelIfPossible(
             format, *formatted_buffer, header, state.query_context);
         output_format->setAutoFlush();
 
+        std::lock_guard lock(*callback_mutex);
         sendResultMetadata(format, FormatFactory::instance().getContentType(format, std::nullopt));
         out->sync();
     }
@@ -1680,6 +1689,9 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
                     executor.cancelReading();
                 }
 
+                /// A block can be empty after the timed pull expires.
+                const bool has_data = !block.empty() && !state.io.null_format && !discard_query_data;
+
                 {
                     std::lock_guard lock(*callback_mutex);
 
@@ -1692,19 +1704,14 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
                     else
                         sendLogs(state);
 
-                    /// A block can be empty after the timed pull expires.
-                    if (!block.empty() && !state.io.null_format && !discard_query_data)
-                    {
-                        if (server_formatted)
-                            output_format->write(materializeBlock(
-                                block,
-                                !output_format->supportsSpecialSerializationKinds()));
-                        else
-                            sendData(state, block);
-                    }
+                    if (has_data && !server_formatted)
+                        sendData(state, block);
 
                     out->sync();
                 }
+
+                if (has_data && server_formatted)
+                    output_format->write(materializeBlock(block, !output_format->supportsSpecialSerializationKinds()));
             }
         }
         catch (...)
@@ -1722,13 +1729,16 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
           */
 
 
-        std::lock_guard lock(*callback_mutex);
+        {
+            std::lock_guard lock(*callback_mutex);
+            receivePacketsExpectCancel(state);
+        }
 
-        receivePacketsExpectCancel(state);
         const Block totals = executor.getTotalsBlock();
         const Block extremes = executor.getExtremesBlock();
         const ProfileInfo profile_info = executor.getProfileInfo();
 
+        /// Outside of `callback_mutex`, see the comment at the creation of `formatted_buffer`.
         if (server_formatted)
         {
             if (!discard_query_data)
@@ -1743,6 +1753,13 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
                         !output_format->supportsSpecialSerializationKinds()));
             }
 
+            /// Formats with statistics in the suffix (e.g. `JSON`) report the rows and bytes read by the query.
+            if (auto process_list_element = state.query_context->getProcessListElementSafe())
+            {
+                const auto progress_in = process_list_element->getProgressIn();
+                output_format->onProgress(Progress(progress_in.read_rows, progress_in.read_bytes));
+            }
+
             if (profile_info.hasAppliedLimit())
                 output_format->setRowsBeforeLimit(profile_info.getRowsBeforeLimit());
             if (profile_info.hasAppliedAggregation())
@@ -1751,7 +1768,10 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
             output_format->finalize();
             formatted_buffer->finalize();
         }
-        else if (!discard_query_data)
+
+        std::lock_guard lock(*callback_mutex);
+
+        if (!server_formatted && !discard_query_data)
         {
             sendTotals(state, totals);
             sendExtremes(state, extremes);
