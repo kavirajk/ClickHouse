@@ -475,28 +475,33 @@ void HTTPHandler::processQuery(
 
     context->setCurrentQueryId(query_id);
 
-    /// Register this HTTP request as an active connection in `system.connections`.
-    /// The handle is destroyed when `processQuery` returns, which automatically deregisters it.
-    ///
-    /// Use `context->getClientInfo().current_address` rather than `request.clientAddress`.
-    /// The latter is always the direct TCP peer (i.e. the proxy), whereas `current_address`
-    /// is set by `authenticateUserByHTTP` and already reflects `X-Forwarded-For` when the
-    /// server is configured to trust it (`auth_use_forwarded_address = true`).
-    /// This keeps `system.connections` consistent with `system.processes`.
+    /// Mark the underlying connection as active in `system.connections` for the duration of this request.
+    /// The connection is registered on its first query and stays registered (as idle between requests)
+    /// until the socket is closed, see `HTTPConnectionRegistration`.
     const auto & http_client_info = context->getClientInfo();
-    ConnectionInfo http_conn_info;
-    http_conn_info.protocol = "HTTP";
-    http_conn_info.client_address = http_client_info.current_address->host();
-    http_conn_info.client_port = static_cast<UInt16>(request.clientAddress().port());
-    http_conn_info.server_port = static_cast<UInt16>(request.serverAddress().port());
-    /// Note: for HTTP, `client_port` reflects the proxy-to-server port when behind a proxy,
-    /// not the original client's ephemeral port. HTTP headers carry no client port information.
-    http_conn_info.user = http_client_info.current_user;
-    http_conn_info.status = "active";
-    http_conn_info.query_id = context->getCurrentQueryId();
-    http_conn_info.client_name = request.get("User-Agent", "");
-    http_conn_info.last_query_time = std::time(nullptr);
-    auto http_connection_handle = ConnectionRegistry::instance().add(std::move(http_conn_info));
+    HTTPConnectionRegistration * connection_registration = request.getConnectionRegistration();
+    if (connection_registration && !connection_registration->handle && ConnectionRegistry::instance().isEnabled())
+    {
+        /// Use `current_address` rather than `request.clientAddress`. The latter is always the direct TCP peer
+        /// (i.e. the proxy), whereas `current_address` is set by `authenticateUserByHTTP` and already reflects
+        /// `X-Forwarded-For` when the server is configured to trust it (`auth_use_forwarded_address = true`).
+        /// This keeps `system.connections` consistent with `system.processes`.
+        /// Note: `client_port` is the port of the direct TCP peer, because HTTP headers carry no client port information.
+        ConnectionInfo info;
+        info.protocol = "HTTP";
+        info.client_address = http_client_info.current_address->host();
+        info.client_port = request.clientAddress().port();
+        info.server_port = request.serverAddress().port();
+        info.client_name = request.get("User-Agent", "");
+        info.connected_time = connection_registration->connected_time;
+        connection_registration->handle = ConnectionRegistry::instance().add(std::move(info), http_client_info.current_user);
+    }
+    if (connection_registration)
+        connection_registration->handle.setActive(http_client_info.current_user, context->getCurrentQueryId());
+    SCOPE_EXIT({
+        if (connection_registration)
+            connection_registration->handle.setIdle();
+    });
 
     context->checkSettingsConstraints(settings_changes, SettingSource::QUERY);
     context->applySettingsChanges(settings_changes);

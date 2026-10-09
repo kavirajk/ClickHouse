@@ -21,6 +21,7 @@ namespace DB
 class X509Certificate;
 class HTTPServerResponse;
 class ReadBufferFromPocoSocket;
+struct HTTPConnectionRegistration;
 
 class HTTPServerRequest : public HTTPRequest
 {
@@ -81,6 +82,11 @@ public:
 
     std::string toStringForLogging() const;
 
+    /// The registration of the underlying connection in `system.connections`, which outlives this request
+    /// on a keep-alive connection. Null if the request is not served by `HTTPServerConnection`.
+    HTTPConnectionRegistration * getConnectionRegistration() const { return connection_registration; }
+    void setConnectionRegistration(HTTPConnectionRegistration * connection_registration_) { connection_registration = connection_registration_; }
+
 private:
     /// Limits for basic sanity checks when reading a header
     enum Limits
@@ -103,6 +109,8 @@ private:
 
     bool stream_is_bounded = false;
     bool secure;
+
+    HTTPConnectionRegistration * connection_registration = nullptr;
 
     void readRequest(ReadBuffer & in);
 };

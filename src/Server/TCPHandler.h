@@ -268,8 +268,8 @@ private:
     UInt64 query_count = 0;
     Stopwatch connection_timer;
 
-    /// Handle for the entry in the global ConnectionRegistry. Created after authentication succeeds.
-    std::optional<ConnectionRegistry::Handle> connection_handle;
+    /// Registration in `ConnectionRegistry` (`system.connections`). Created after authentication succeeds.
+    ConnectionHandle connection_handle;
 
     /// `callback_mutex` protects using `out` (WriteBuffer), `in` (ReadBuffer) and other members concurrent inside callbacks.
     /// All the methods which are run inside callbacks are marked with TSA_REQUIRES.

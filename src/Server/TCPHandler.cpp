@@ -544,28 +544,26 @@ void TCPHandler::runImpl()
         throw;
     }
 
-    /// Register this connection in the global registry so it is visible in system.connections.
-    /// Interserver connections are excluded as they are internal.
-    if (!is_interserver_mode && session)
+    /// Register this connection in the global registry so it is visible in `system.connections`.
+    /// Interserver connections (with the cluster secret) are excluded, because they are internal.
+    if (!is_interserver_mode && session && ConnectionRegistry::instance().isEnabled())
     {
         const auto & client_info = session->getClientInfo();
-        /// Use getClientAddress() here — same logic as session->authenticate() and system.processes.
-        /// This respects the PROXY protocol header and auth_use_forwarded_address, so behind a
+        /// Use `getClientAddress` here - same logic as `session->authenticate` and `system.processes`.
+        /// This respects the PROXY protocol header and `auth_use_forwarded_address`, so behind a
         /// proxy the real client address is shown rather than the proxy's address.
         const auto client_addr = getClientAddress(client_info);
         ConnectionInfo info;
         info.protocol = "TCP";
         info.client_address = client_addr.host();
-        info.client_port = static_cast<UInt16>(client_addr.port());
+        info.client_port = client_addr.port();
         info.server_port = tcp_server.portNumber();
-        info.user = client_info.current_user;
-        info.status = "idle";
         info.client_name = client_name;
         info.client_version_major = client_version_major;
         info.client_version_minor = client_version_minor;
         info.client_version_patch = client_version_patch;
         info.connected_time = std::time(nullptr);
-        connection_handle = ConnectionRegistry::instance().add(std::move(info));
+        connection_handle = ConnectionRegistry::instance().add(std::move(info), client_info.current_user);
     }
 
     while (tcp_server.isOpen())
@@ -975,9 +973,9 @@ void TCPHandler::runImpl()
             if (client_tcp_protocol_version < DBMS_MIN_REVISION_WITH_OUT_OF_ORDER_BUCKETS_IN_AGGREGATION)
                 query_state->query_context->setSetting("enable_producing_buckets_out_of_order_in_aggregation", false);
 
-            if (connection_handle)
-                connection_handle->setActive(query_state->query_context->getCurrentQueryId());
-            SCOPE_EXIT({ if (connection_handle) connection_handle->setIdle(); });
+            /// Reset the status in `system.connections` on any exit from this scope, including exceptions.
+            connection_handle.setActive(query_state->query_context->getClientInfo().current_user, query_state->query_context->getCurrentQueryId());
+            SCOPE_EXIT(connection_handle.setIdle());
 
             /// Processing Query
             std::tie(query_state->parsed_query, query_state->io) = executeQuery(query_state->query, query_state->query_context, QueryFlags{}, query_state->stage);

@@ -1248,7 +1248,7 @@ Possible values:
     DECLARE(UInt64, total_memory_profiler_sample_max_allocation_size, 0, R"(Collect random allocations of size less or equal than specified value with probability equal to `total_memory_profiler_sample_probability`. 0 means disabled. You may want to set 'max_untracked_memory' to 0 to make this threshold to work as expected.)", 0) \
     DECLARE(Bool, collect_connection_metrics, false, R"(Enables the `system.connections` table, which tracks connections handled by the native ClickHouse TCP and HTTP query interfaces. MySQL, PostgreSQL, gRPC, and other protocol handlers are not included.
 
-When enabled, every accepted TCP and HTTP connection is registered in a global in-memory registry and exposed through `system.connections`. This adds a small amount of synchronization overhead per connection and per query, so it defaults to `false`.
+When enabled, every authenticated native TCP connection and every HTTP connection which executes a query is registered in a global in-memory registry and exposed through `system.connections` until it is closed (an HTTP keep-alive connection is shown as idle between requests). This adds a small amount of synchronization overhead per connection and per query, so it defaults to `false`. Without the `SHOW CONNECTIONS` privilege, a user sees only their own connections.
 
 Example configuration:
 

@@ -2655,7 +2655,50 @@ moved to the TTL destination by a background move task (observable via
     if (context->getConfigRef().getBool("collect_connection_metrics", false))
     {
         ConnectionRegistry::instance().enable();
-        attach<StorageSystemConnections>(context, system_database, "connections", "Contains a list of currently active client connections to the server (TCP and HTTP). Requires the collect_connection_metrics server setting to be enabled.");
+        attach<StorageSystemConnections>(context, system_database, "connections", R"DOCS_MD(
+.description
+Contains client connections of the native TCP and HTTP query interfaces which are currently open, both active
+(executing a query) and idle (waiting for the next query). Connections of other protocols (MySQL, PostgreSQL, gRPC, etc.),
+interserver connections, and HTTP connections which have not executed a query (for example, `/ping` or Prometheus) are not included.
+
+The table exists only if the `collect_connection_metrics` server setting is enabled.
+
+A TCP connection is registered after authentication and is removed when it is closed. An HTTP connection is registered on its
+first query and is removed when the socket is closed, so a keep-alive connection is shown as `idle` between requests.
+
+Without the `SHOW CONNECTIONS` privilege, a user sees only their own connections.
+
+.examples
+```sql
+SELECT connection_id, protocol, user, status, query_id, client_name, connected_time, last_query_time
+FROM system.connections
+FORMAT Vertical;
+```
+
+```response
+Row 1:
+──────
+connection_id:   2
+protocol:        TCP
+user:            default
+status:          active
+query_id:        845dcadd-7249-4ce4-8c3d-c08032594155
+client_name:     ClickHouse client
+connected_time:  2026-03-17 09:18:18
+last_query_time: 2026-03-17 09:18:27
+
+Row 2:
+──────
+connection_id:   1
+protocol:        HTTP
+user:            default
+status:          idle
+query_id:
+client_name:     curl/8.5.0
+connected_time:  2026-03-17 09:18:14
+last_query_time: 2026-03-17 09:18:14
+```
+)DOCS_MD");
     }
     attach<StorageSystemProcesses>(context, system_database, "processes", R"DOCS_MD(
 .description

@@ -1,12 +1,98 @@
 #include <Server/ConnectionRegistry.h>
 
-#include <ctime>
-#include <mutex>
-#include <shared_mutex>
-
 
 namespace DB
 {
+
+ConnectionState::ConnectionState(UInt64 connection_id_, ConnectionInfo info_, String user_)
+    : connection_id(connection_id_)
+    , info(std::move(info_))
+    , user(std::move(user_))
+{
+}
+
+void ConnectionState::setActive(const String & user_, const String & query_id_)
+{
+    const time_t now = std::time(nullptr);
+    std::lock_guard lock(mutex);
+    user = user_;
+    is_active = true;
+    query_id = query_id_;
+    last_query_time = now;
+}
+
+void ConnectionState::setIdle()
+{
+    std::lock_guard lock(mutex);
+    is_active = false;
+    query_id.clear();
+}
+
+ConnectionSnapshot ConnectionState::getSnapshot() const
+{
+    ConnectionSnapshot snapshot;
+    snapshot.connection_id = connection_id;
+    snapshot.info = info;
+
+    std::lock_guard lock(mutex);
+    snapshot.user = user;
+    snapshot.is_active = is_active;
+    snapshot.query_id = query_id;
+    snapshot.last_query_time = last_query_time;
+    return snapshot;
+}
+
+
+ConnectionHandle::ConnectionHandle(ConnectionRegistry & registry_, ConnectionStatePtr state_)
+    : registry(&registry_)
+    , state(std::move(state_))
+{
+}
+
+ConnectionHandle::~ConnectionHandle()
+{
+    reset();
+}
+
+ConnectionHandle::ConnectionHandle(ConnectionHandle && other) noexcept
+    : registry(other.registry)
+    , state(std::move(other.state))
+{
+    other.registry = nullptr;
+}
+
+ConnectionHandle & ConnectionHandle::operator=(ConnectionHandle && other) noexcept
+{
+    if (this != &other)
+    {
+        reset();
+        registry = other.registry;
+        state = std::move(other.state);
+        other.registry = nullptr;
+    }
+    return *this;
+}
+
+void ConnectionHandle::reset()
+{
+    if (state)
+        registry->remove(state->connection_id);
+    state.reset();
+    registry = nullptr;
+}
+
+void ConnectionHandle::setActive(const String & user, const String & query_id)
+{
+    if (state)
+        state->setActive(user, query_id);
+}
+
+void ConnectionHandle::setIdle()
+{
+    if (state)
+        state->setIdle();
+}
+
 
 ConnectionRegistry & ConnectionRegistry::instance()
 {
@@ -19,57 +105,44 @@ void ConnectionRegistry::enable()
     enabled.store(true, std::memory_order_relaxed);
 }
 
-ConnectionRegistry::Handle ConnectionRegistry::add(ConnectionInfo info)
+ConnectionHandle ConnectionRegistry::add(ConnectionInfo info, String user)
 {
-    if (!enabled.load(std::memory_order_relaxed))
-        return Handle(); /// no-op handle when feature is disabled
+    if (!isEnabled())
+        return {};
 
-    UInt64 id = next_id.fetch_add(1, std::memory_order_relaxed);
-    info.connection_id = id;
+    const UInt64 id = next_id.fetch_add(1, std::memory_order_relaxed);
+    auto state = std::make_shared<ConnectionState>(id, std::move(info), std::move(user));
 
-    std::unique_lock lock(mutex);
-    connections.emplace(id, std::move(info));
-    return Handle(*this, id);
+    {
+        std::lock_guard lock(mutex);
+        connections.emplace(id, state);
+    }
+    return ConnectionHandle(*this, std::move(state));
 }
 
-std::vector<ConnectionInfo> ConnectionRegistry::list() const
+std::vector<ConnectionSnapshot> ConnectionRegistry::list() const
 {
-    std::shared_lock lock(mutex);
-    std::vector<ConnectionInfo> result;
-    result.reserve(connections.size());
-    for (const auto & [_, info] : connections)
-        result.push_back(info);
+    /// Copy the pointers under the registry-wide lock and take the snapshots outside of it,
+    /// so that the per-connection locks are never acquired while the registry-wide lock is held.
+    std::vector<ConnectionStatePtr> states;
+    {
+        std::lock_guard lock(mutex);
+        states.reserve(connections.size());
+        for (const auto & [_, state] : connections)
+            states.push_back(state);
+    }
+
+    std::vector<ConnectionSnapshot> result;
+    result.reserve(states.size());
+    for (const auto & state : states)
+        result.push_back(state->getSnapshot());
     return result;
 }
 
 void ConnectionRegistry::remove(UInt64 id)
 {
-    std::unique_lock lock(mutex);
+    std::lock_guard lock(mutex);
     connections.erase(id);
-}
-
-void ConnectionRegistry::update(UInt64 id, const String & status, const String & query_id, time_t last_query_time)
-{
-    std::unique_lock lock(mutex);
-    auto it = connections.find(id);
-    if (it == connections.end())
-        return;
-    it->second.status = status;
-    it->second.query_id = query_id;
-    if (last_query_time != 0)
-        it->second.last_query_time = last_query_time;
-}
-
-void ConnectionRegistry::Handle::setActive(const String & query_id_)
-{
-    if (registry)
-        registry->update(id, "active", query_id_, std::time(nullptr));
-}
-
-void ConnectionRegistry::Handle::setIdle()
-{
-    if (registry)
-        registry->update(id, "idle", "", 0);
 }
 
 }

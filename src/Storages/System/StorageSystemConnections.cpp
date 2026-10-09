@@ -1,11 +1,14 @@
 #include <Storages/System/StorageSystemConnections.h>
 
+#include <Access/Common/AccessType.h>
+#include <Access/ContextAccess.h>
 #include <DataTypes/DataTypeDateTime.h>
 #include <DataTypes/DataTypeFactory.h>
 #include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeString.h>
 #include <DataTypes/DataTypesNumber.h>
+#include <Interpreters/Context.h>
 #include <Common/IPv6ToBinary.h>
 #include <Server/ConnectionRegistry.h>
 
@@ -19,51 +22,54 @@ ColumnsDescription StorageSystemConnections::getColumnsDescription()
 
     return ColumnsDescription
     {
-        {"connection_id",          std::make_shared<DataTypeUInt64>(),                                                    "Unique identifier of the connection, assigned when the connection is established."},
-        {"protocol",               low_cardinality_string,                                                                "Protocol used by the connection: TCP (native protocol) or HTTP."},
-        {"client_address",         DataTypeFactory::instance().get("IPv6"),                                               "IP address of the client."},
-        {"client_port",            std::make_shared<DataTypeUInt16>(),                                                    "TCP port of the client."},
-        {"server_port",            std::make_shared<DataTypeUInt16>(),                                                    "Server port that accepted the connection."},
-        {"user",                   std::make_shared<DataTypeString>(),                                                    "Name of the authenticated user."},
-        {"status",                 low_cardinality_string,                                                                "Connection status: active means a query is currently being executed, idle means the connection is open but waiting for the next query (TCP only)."},
-        {"query_id",               std::make_shared<DataTypeString>(),                                                    "Identifier of the query currently being executed. Empty when the connection is idle."},
-        {"client_name",            std::make_shared<DataTypeString>(),                                                    "Name of the client application: reported during the TCP handshake for native connections, taken from the User-Agent header for HTTP connections."},
-        {"client_version_major",   std::make_shared<DataTypeUInt64>(),                                                    "Major version of the client, as reported during the TCP handshake."},
-        {"client_version_minor",   std::make_shared<DataTypeUInt64>(),                                                    "Minor version of the client, as reported during the TCP handshake."},
-        {"client_version_patch",   std::make_shared<DataTypeUInt64>(),                                                    "Patch version of the client, as reported during the TCP handshake."},
-        {"connected_time",         std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()),              "Time at which the connection was established. NULL for HTTP connections (which are per-request)."},
-        {"last_query_time",        std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()),              "Time at which the most recent query on this connection started. NULL if no query has been executed yet."},
+        {"connection_id",          std::make_shared<DataTypeUInt64>(),                                       "Unique identifier of the connection, assigned when the connection is registered: after authentication for TCP connections, and on the first query for HTTP connections."},
+        {"protocol",               low_cardinality_string,                                                   "Protocol used by the connection: TCP (native protocol) or HTTP."},
+        {"client_address",         DataTypeFactory::instance().get("IPv6"),                                  "IP address of the client. Behind a proxy, it is the address of the original client when the server is configured to trust the PROXY protocol or the `X-Forwarded-For` header."},
+        {"client_port",            std::make_shared<DataTypeUInt16>(),                                       "TCP port of the client. For HTTP connections behind a proxy, it is the port of the proxy, because HTTP headers carry no client port."},
+        {"server_port",            std::make_shared<DataTypeUInt16>(),                                       "Server port that accepted the connection."},
+        {"user",                   std::make_shared<DataTypeString>(),                                       "Name of the authenticated user. For HTTP connections, it is the user of the most recent request, because requests on a keep-alive connection are authenticated separately."},
+        {"status",                 low_cardinality_string,                                                   "Connection status: `active` means a query is currently being executed, `idle` means the connection is open and waiting for the next query (or for the next request on an HTTP keep-alive connection)."},
+        {"query_id",               std::make_shared<DataTypeString>(),                                       "Identifier of the query currently being executed. Empty when the connection is idle."},
+        {"client_name",            std::make_shared<DataTypeString>(),                                       "Name of the client application: reported during the handshake for TCP connections, taken from the `User-Agent` header of the first query for HTTP connections."},
+        {"client_version_major",   std::make_shared<DataTypeUInt64>(),                                       "Major version of the client, as reported during the TCP handshake. 0 for HTTP connections."},
+        {"client_version_minor",   std::make_shared<DataTypeUInt64>(),                                       "Minor version of the client, as reported during the TCP handshake. 0 for HTTP connections."},
+        {"client_version_patch",   std::make_shared<DataTypeUInt64>(),                                       "Patch version of the client, as reported during the TCP handshake. 0 for HTTP connections."},
+        {"connected_time",         std::make_shared<DataTypeDateTime>(),                                     "Time at which the connection was established (for TCP connections, after authentication)."},
+        {"last_query_time",        std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "Time at which the most recent query on this connection started. NULL if no query has been executed yet."},
     };
 }
 
 
-void StorageSystemConnections::fillData(MutableColumns & res_columns, ContextPtr, const ActionsDAG::Node *, std::vector<UInt8>) const
+void StorageSystemConnections::fillData(MutableColumns & res_columns, ContextPtr context, const ActionsDAG::Node *, std::vector<UInt8>) const
 {
-    const auto connections = ConnectionRegistry::instance().list();
+    /// Connections expose the addresses and activity of other users, so without the `SHOW CONNECTIONS`
+    /// privilege a user sees only their own connections.
+    const bool show_all_users = context->getAccess()->isGranted(AccessType::SHOW_CONNECTIONS);
+    const String current_user = context->getClientInfo().current_user;
 
-    for (const auto & conn : connections)
+    for (const auto & conn : ConnectionRegistry::instance().list())
     {
+        if (!show_all_users && conn.user != current_user)
+            continue;
+
         size_t i = 0;
         res_columns[i++]->insert(conn.connection_id);
-        res_columns[i++]->insert(conn.protocol);
-        res_columns[i++]->insertData(IPv6ToBinary(conn.client_address).data(), 16);
-        res_columns[i++]->insert(conn.client_port);
-        res_columns[i++]->insert(conn.server_port);
+        res_columns[i++]->insert(conn.info.protocol);
+        res_columns[i++]->insertData(IPv6ToBinary(conn.info.client_address).data(), 16);
+        res_columns[i++]->insert(conn.info.client_port);
+        res_columns[i++]->insert(conn.info.server_port);
         res_columns[i++]->insert(conn.user);
-        res_columns[i++]->insert(conn.status);
+        res_columns[i++]->insert(conn.is_active ? "active" : "idle");
         res_columns[i++]->insert(conn.query_id);
-        res_columns[i++]->insert(conn.client_name);
-        res_columns[i++]->insert(conn.client_version_major);
-        res_columns[i++]->insert(conn.client_version_minor);
-        res_columns[i++]->insert(conn.client_version_patch);
-        if (conn.connected_time != 0)
-            res_columns[i++]->insert(static_cast<UInt32>(conn.connected_time));
-        else
-            res_columns[i++]->insert(Field{});
+        res_columns[i++]->insert(conn.info.client_name);
+        res_columns[i++]->insert(conn.info.client_version_major);
+        res_columns[i++]->insert(conn.info.client_version_minor);
+        res_columns[i++]->insert(conn.info.client_version_patch);
+        res_columns[i++]->insert(static_cast<UInt32>(conn.info.connected_time));
         if (conn.last_query_time != 0)
             res_columns[i++]->insert(static_cast<UInt32>(conn.last_query_time));
         else
-            res_columns[i++]->insert(Field{});
+            res_columns[i++]->insertDefault();
     }
 }
 
