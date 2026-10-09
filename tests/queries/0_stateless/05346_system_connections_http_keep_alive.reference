@@ -1,0 +1,9 @@
+--- not registered before the first query
+0
+--- the same connection_id for all requests on the connection
+True
+True
+--- idle between requests
+HTTP	idle	1	default	system-connections-keep-alive-test	1
+--- removed after the socket is closed
+removed
