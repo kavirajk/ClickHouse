@@ -2,8 +2,8 @@
 # Tags: no-fasttest
 # no-fasttest: requires clickhouse_driver
 
-# Without the `SHOW CONNECTIONS` privilege, a user sees only their own connections in `system.connections`.
-# Requires `collect_connection_metrics = true` in the server config.
+# A user without the `SHOW CONNECTIONS` privilege sees only the connections of this user in `system.connections`.
+# The server config must set `collect_connection_metrics` to `true`.
 
 import os
 import urllib.parse
@@ -31,11 +31,11 @@ query(f"CREATE USER {USER} NOT IDENTIFIED")
 query(f"GRANT SELECT ON system.connections TO {USER}")
 
 try:
-    # A connection of another user, which stays open (idle) during the checks.
+    # A connection of a different user. This connection stays open and idle until the checks end.
     client = Client(CLICKHOUSE_HOST, port=CLICKHOUSE_PORT_TCP, user="default", password="")
     other_id = client.execute("SELECT connection_id FROM system.connections WHERE query_id = currentQueryID()")[0][0]
 
-    print("--- without SHOW CONNECTIONS: only own connections")
+    print("--- without SHOW CONNECTIONS: only the connections of this user")
     print(query(f"SELECT count() FROM system.connections WHERE connection_id = {other_id}", USER))
     print(query("SELECT countIf(user = currentUser()) > 0, countIf(user != currentUser()) FROM system.connections", USER))
 

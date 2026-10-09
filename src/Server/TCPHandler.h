@@ -268,7 +268,7 @@ private:
     UInt64 query_count = 0;
     Stopwatch connection_timer;
 
-    /// Registration in `ConnectionRegistry` (`system.connections`). Created after authentication succeeds.
+    /// The registration in `ConnectionRegistry` (`system.connections`). `runImpl` makes it after a successful authentication.
     ConnectionHandle connection_handle;
 
     /// `callback_mutex` protects using `out` (WriteBuffer), `in` (ReadBuffer) and other members concurrent inside callbacks.

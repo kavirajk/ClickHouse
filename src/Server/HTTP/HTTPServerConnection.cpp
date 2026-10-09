@@ -46,7 +46,7 @@ void HTTPServerConnection::run()
 
     ProfileEvents::increment(ProfileEvents::HTTPServerConnectionsCreated);
 
-    /// Lives as long as the socket, so a keep-alive connection stays in `system.connections` (as idle) between requests.
+    /// This object stays until the socket closes. Thus, `system.connections` shows a keep-alive connection as idle between the requests.
     HTTPConnectionRegistration connection_registration{.connected_time = std::time(nullptr), .handle = {}};
 
     while (!stopped && tcp_server.isOpen() && session.connected())

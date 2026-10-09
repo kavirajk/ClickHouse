@@ -122,8 +122,8 @@ ConnectionHandle ConnectionRegistry::add(ConnectionInfo info, String user)
 
 std::vector<ConnectionSnapshot> ConnectionRegistry::list() const
 {
-    /// Copy the pointers under the registry-wide lock and take the snapshots outside of it,
-    /// so that the per-connection locks are never acquired while the registry-wide lock is held.
+    /// Copy the pointers with the registry-wide lock. Then release this lock and make the copies of the connections.
+    /// Thus, this function does not lock a connection mutex when it holds the registry-wide lock.
     std::vector<ConnectionStatePtr> states;
     {
         std::lock_guard lock(mutex);

@@ -82,8 +82,9 @@ public:
 
     std::string toStringForLogging() const;
 
-    /// The registration of the underlying connection in `system.connections`, which outlives this request
-    /// on a keep-alive connection. Null if the request is not served by `HTTPServerConnection`.
+    /// The registration of the connection of this request in `system.connections`.
+    /// On a keep-alive connection, the registration stays after this request.
+    /// Null if `HTTPServerConnection` does not serve the request.
     HTTPConnectionRegistration * getConnectionRegistration() const { return connection_registration; }
     void setConnectionRegistration(HTTPConnectionRegistration * connection_registration_) { connection_registration = connection_registration_; }
 

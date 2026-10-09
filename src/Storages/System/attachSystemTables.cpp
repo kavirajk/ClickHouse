@@ -2657,16 +2657,21 @@ moved to the TTL destination by a background move task (observable via
         ConnectionRegistry::instance().enable();
         attach<StorageSystemConnections>(context, system_database, "connections", R"DOCS_MD(
 .description
-Contains client connections of the native TCP and HTTP query interfaces which are currently open, both active
-(executing a query) and idle (waiting for the next query). Connections of other protocols (MySQL, PostgreSQL, gRPC, etc.),
-interserver connections, and HTTP connections which have not executed a query (for example, `/ping` or Prometheus) are not included.
+Shows the open client connections of the native TCP and HTTP query interfaces.
+A connection is `active` when a query runs. A connection is `idle` when it waits for the next query.
 
-The table exists only if the `collect_connection_metrics` server setting is enabled.
+The table does not show these connections:
+- Connections of other protocols, for example MySQL, PostgreSQL, and gRPC.
+- Interserver connections.
+- HTTP connections that did not run a query, for example `/ping` and Prometheus connections.
 
-A TCP connection is registered after authentication and is removed when it is closed. An HTTP connection is registered on its
-first query and is removed when the socket is closed, so a keep-alive connection is shown as `idle` between requests.
+The table is available only if the server setting `collect_connection_metrics` is `true`.
 
-Without the `SHOW CONNECTIONS` privilege, a user sees only their own connections.
+The server adds a TCP connection to the table after authentication. The server removes the connection when it closes.
+The server adds an HTTP connection to the table on its first query. The server removes the connection when the socket closes.
+Thus, the table shows an HTTP keep-alive connection as `idle` between the requests.
+
+A user without the `SHOW CONNECTIONS` privilege sees only the connections of this user.
 
 .examples
 ```sql

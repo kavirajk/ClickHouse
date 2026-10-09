@@ -15,7 +15,7 @@
 namespace DB
 {
 
-/// Properties of a client connection which are known when it is registered and never change afterwards.
+/// The properties of a client connection that do not change after registration.
 struct ConnectionInfo
 {
     String protocol;            /// "TCP" or "HTTP"
@@ -30,28 +30,28 @@ struct ConnectionInfo
 };
 
 
-/// A consistent point-in-time copy of a registered connection, as returned by `ConnectionRegistry::list`.
+/// A copy of a registered connection at one point in time. `ConnectionRegistry::list` returns these copies.
 struct ConnectionSnapshot
 {
     UInt64 connection_id = 0;
     ConnectionInfo info;
     String user;
-    bool is_active = false;     /// true while a query is executed, false while the connection waits for the next query
-    String query_id;            /// empty while idle
-    time_t last_query_time = 0; /// 0 if no query has been executed yet
+    bool is_active = false;     /// true when a query runs, false when the connection waits for the next query
+    String query_id;            /// empty when the connection is idle
+    time_t last_query_time = 0; /// 0 if the connection did not run a query
 };
 
 
-/// A registered connection: an immutable part and a mutable part, which is updated on every query.
-/// The mutable part is protected by a per-connection mutex, so that frequent updates from different
-/// connections do not contend with each other on the registry-wide lock.
+/// A registered connection. It has two parts:
+/// - A constant part.
+/// - A part that changes on each query. A mutex of this connection protects this part.
+/// Thus, updates on different connections do not wait for one registry-wide lock.
 class ConnectionState
 {
 public:
     ConnectionState(UInt64 connection_id_, ConnectionInfo info_, String user_);
 
-    /// The user is passed on every query, because an HTTP keep-alive connection
-    /// may carry requests of different users.
+    /// Each query gives the user again. An HTTP keep-alive connection can have requests of different users.
     void setActive(const String & user_, const String & query_id_);
     void setIdle();
 
@@ -73,8 +73,8 @@ using ConnectionStatePtr = std::shared_ptr<ConnectionState>;
 
 class ConnectionRegistry;
 
-/// Owns the registration of a connection in `ConnectionRegistry` and removes it on destruction.
-/// A default-constructed (or moved-from) handle is empty, and all its methods are no-ops.
+/// Owns the registration of a connection in `ConnectionRegistry`. The destructor removes the registration.
+/// A default-constructed or moved-from handle is empty. The methods of an empty handle do nothing.
 class ConnectionHandle
 {
 public:
@@ -100,12 +100,13 @@ private:
 };
 
 
-/// The connection-level part of an HTTP connection registration, shared by all requests of a keep-alive connection.
-/// `HTTPServerConnection` serves every HTTP-based interface (queries, interserver replication, Prometheus, Keeper, ...),
-/// so it cannot register the connection itself. Instead, it owns this slot for the lifetime of the socket,
-/// and `HTTPHandler` registers the connection in it when it serves the first query.
-/// The registration is removed when the socket is closed, not when a request is finished,
-/// so that a keep-alive connection is visible as idle between requests.
+/// The registration of one HTTP connection. All requests of a keep-alive connection use the same registration.
+/// `HTTPServerConnection` serves all HTTP interfaces: queries, interserver replication, Prometheus, Keeper, and others.
+/// Thus, `HTTPServerConnection` does not register the connection.
+/// `HTTPServerConnection` keeps this object until the socket closes.
+/// `HTTPHandler` registers the connection in this object when the connection gets its first query.
+/// The registration stays after each request and goes away when the socket closes.
+/// Thus, `system.connections` shows a keep-alive connection as idle between the requests.
 struct HTTPConnectionRegistration
 {
     time_t connected_time = 0;
@@ -113,22 +114,24 @@ struct HTTPConnectionRegistration
 };
 
 
-/// Global registry of client connections of the native TCP and HTTP query interfaces, exposed via `system.connections`.
-/// The registry-wide lock is taken only when a connection is added, removed, or listed, but not on every query.
+/// The global registry of client connections of the native TCP and HTTP query interfaces.
+/// `system.connections` shows the contents of this registry.
+/// The registry-wide lock protects only these operations: add a connection, remove a connection, and list the connections.
+/// A query does not use this lock.
 class ConnectionRegistry
 {
 public:
     static ConnectionRegistry & instance();
 
-    /// Must be called once at server startup (from `attachSystemTablesServer`) when
-    /// `collect_connection_metrics` is enabled. Until this is called, `add` returns an empty handle.
+    /// Call this function one time at server start (from `attachSystemTablesServer`) if `collect_connection_metrics` is `true`.
+    /// Before this call, `add` returns an empty handle.
     void enable();
     bool isEnabled() const { return enabled.load(std::memory_order_relaxed); }
 
-    /// Registers a connection which is idle until the first `setActive`.
+    /// Registers a connection. The connection is idle until the first call to `setActive`.
     ConnectionHandle add(ConnectionInfo info, String user);
 
-    /// Returns a snapshot of all currently registered connections.
+    /// Returns a copy of all registered connections.
     std::vector<ConnectionSnapshot> list() const;
 
 private:

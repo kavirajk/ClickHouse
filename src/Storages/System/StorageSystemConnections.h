@@ -9,8 +9,8 @@ namespace DB
 class Context;
 
 
-/** Implements `connections` system table, which allows you to see information about
-  * currently active client connections to the server (TCP and HTTP protocols).
+/** Implements the `connections` system table.
+  * This table shows the open client connections of the native TCP and HTTP query interfaces.
   */
 class StorageSystemConnections final : public IStorageSystemOneBlock
 {

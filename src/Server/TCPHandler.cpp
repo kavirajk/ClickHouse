@@ -544,14 +544,14 @@ void TCPHandler::runImpl()
         throw;
     }
 
-    /// Register this connection in the global registry so it is visible in `system.connections`.
-    /// Interserver connections (with the cluster secret) are excluded, because they are internal.
+    /// Register this connection in the global registry. Then `system.connections` shows this connection.
+    /// Do not register interserver connections (connections with the cluster secret). These connections are internal.
     if (!is_interserver_mode && session && ConnectionRegistry::instance().isEnabled())
     {
         const auto & client_info = session->getClientInfo();
-        /// Use `getClientAddress` here - same logic as `session->authenticate` and `system.processes`.
-        /// This respects the PROXY protocol header and `auth_use_forwarded_address`, so behind a
-        /// proxy the real client address is shown rather than the proxy's address.
+        /// Use `getClientAddress`. `session->authenticate` and `system.processes` use the same function.
+        /// This function uses the PROXY protocol header and `auth_use_forwarded_address`.
+        /// Thus, behind a proxy, the table shows the address of the client, not the address of the proxy.
         const auto client_addr = getClientAddress(client_info);
         ConnectionInfo info;
         info.protocol = "TCP";
@@ -973,7 +973,7 @@ void TCPHandler::runImpl()
             if (client_tcp_protocol_version < DBMS_MIN_REVISION_WITH_OUT_OF_ORDER_BUCKETS_IN_AGGREGATION)
                 query_state->query_context->setSetting("enable_producing_buckets_out_of_order_in_aggregation", false);
 
-            /// Reset the status in `system.connections` on any exit from this scope, including exceptions.
+            /// Set the connection to idle in `system.connections` at each exit from this scope. This includes exceptions.
             connection_handle.setActive(query_state->query_context->getClientInfo().current_user, query_state->query_context->getCurrentQueryId());
             SCOPE_EXIT(connection_handle.setIdle());
 

@@ -475,18 +475,18 @@ void HTTPHandler::processQuery(
 
     context->setCurrentQueryId(query_id);
 
-    /// Mark the underlying connection as active in `system.connections` for the duration of this request.
-    /// The connection is registered on its first query and stays registered (as idle between requests)
-    /// until the socket is closed, see `HTTPConnectionRegistration`.
+    /// Set the connection of this request to active in `system.connections` until the request ends.
+    /// The connection gets its registration on its first query. The registration stays until the socket closes.
+    /// Between the requests, the connection is idle. See `HTTPConnectionRegistration`.
     const auto & http_client_info = context->getClientInfo();
     HTTPConnectionRegistration * connection_registration = request.getConnectionRegistration();
     if (connection_registration && !connection_registration->handle && ConnectionRegistry::instance().isEnabled())
     {
-        /// Use `current_address` rather than `request.clientAddress`. The latter is always the direct TCP peer
-        /// (i.e. the proxy), whereas `current_address` is set by `authenticateUserByHTTP` and already reflects
-        /// `X-Forwarded-For` when the server is configured to trust it (`auth_use_forwarded_address = true`).
-        /// This keeps `system.connections` consistent with `system.processes`.
-        /// Note: `client_port` is the port of the direct TCP peer, because HTTP headers carry no client port information.
+        /// Use `current_address`. Do not use `request.clientAddress`.
+        /// `request.clientAddress` is always the direct TCP peer. Behind a proxy, it is the address of the proxy.
+        /// `authenticateUserByHTTP` sets `current_address`. If `auth_use_forwarded_address` is `true`, this address comes from `X-Forwarded-For`.
+        /// Thus, `system.connections` and `system.processes` show the same address.
+        /// Note: `client_port` is the port of the direct TCP peer. HTTP headers do not contain the client port.
         ConnectionInfo info;
         info.protocol = "HTTP";
         info.client_address = http_client_info.current_address->host();

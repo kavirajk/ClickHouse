@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
-# An HTTP keep-alive connection in `system.connections`: it is registered on its first query (not on `/ping`),
-# keeps the same `connection_id` for all requests, is shown as idle between requests,
-# and is removed when the socket is closed.
-# Requires `collect_connection_metrics = true` in the server config.
+# An HTTP keep-alive connection in `system.connections`:
+# 1. The connection gets its registration on its first query. A `/ping` request does not register it.
+# 2. All requests on the connection have the same `connection_id`.
+# 3. The connection is idle between the requests.
+# 4. The table does not show the connection after the socket closes.
+# The server config must set `collect_connection_metrics` to `true`.
 
 import http.client
 import os
@@ -20,7 +22,7 @@ USER_AGENT = "system-connections-keep-alive-test"
 
 
 def observe(query):
-    """Run a query on a fresh, non-keep-alive HTTP connection and return its TSV output."""
+    """Run a query on a new HTTP connection without keep-alive. Return the TSV output."""
     url = HTTP_URL + "?" + urllib.parse.urlencode({"query": query})
     with urllib.request.urlopen(url, timeout=TIMEOUT) as response:
         return response.read().decode().rstrip("\n")
@@ -53,21 +55,21 @@ def query(sql):
     return request("POST", "/", sql)
 
 
-# The keep-alive connection is the only one with this client port while it is open.
+# When the keep-alive connection is open, no other connection has this client port.
 request("GET", "/ping")
 client_port = connection.sock.getsockname()[1]
 by_port = f"protocol = 'HTTP' AND client_port = {client_port}"
 
-print("--- not registered before the first query")
+print("--- not in the table before the first query")
 print(observe(f"SELECT count() FROM system.connections WHERE {by_port}"))
 
-print("--- the same connection_id for all requests on the connection")
+print("--- the same connection_id for all requests")
 own_id_query = "SELECT connection_id FROM system.connections WHERE query_id = currentQueryID() AND status = 'active'"
 connection_id = query(own_id_query)
 print(query(own_id_query) == connection_id)
 print(observe(f"SELECT connection_id FROM system.connections WHERE {by_port}") == connection_id)
 
-print("--- idle between requests")
+print("--- idle between the requests")
 print(
     observe(
         "SELECT protocol, status, query_id = '', user, client_name, last_query_time >= connected_time "
@@ -75,7 +77,7 @@ print(
     )
 )
 
-print("--- removed after the socket is closed")
+print("--- removed after the socket closes")
 connection.close()
 wait_for(f"SELECT count() FROM system.connections WHERE connection_id = {connection_id}", "0")
 print("removed")

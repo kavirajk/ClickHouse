@@ -2,11 +2,13 @@
 # Tags: no-fasttest
 # no-fasttest: requires clickhouse_driver
 
-# Lifecycle of a single persistent native TCP connection in `system.connections`:
-# idle after a query, active while a query runs, idle again after a query fails or is killed,
-# and removed after the client disconnects. The same `connection_id` is tracked through all transitions,
-# and it is observed from separate connections while the tracked connection is idle.
-# Requires `collect_connection_metrics = true` in the server config.
+# Lifecycle of one persistent native TCP connection in `system.connections`:
+# 1. The connection is idle after a query.
+# 2. The connection is active when a query runs.
+# 3. The connection is idle after a query fails or after KILL QUERY.
+# 4. The table does not show the connection after the client disconnects.
+# The test uses the same `connection_id` for all steps. Other connections read the state of this connection.
+# The server config must set `collect_connection_metrics` to `true`.
 
 import os
 import time
@@ -26,7 +28,7 @@ TIMEOUT = 60
 
 
 def observe(query):
-    """Run a query on a fresh, non-keep-alive HTTP connection and return its TSV output."""
+    """Run a query on a new HTTP connection without keep-alive. Return the TSV output."""
     url = HTTP_URL + "?" + urllib.parse.urlencode({"query": query})
     with urllib.request.urlopen(url, timeout=TIMEOUT) as response:
         return response.read().decode().rstrip("\n")
@@ -49,7 +51,7 @@ def send_query(connection, query, query_id):
 
 
 def receive_result(connection):
-    """Read the result of a query. Unlike `Client.execute`, a server exception does not close the connection."""
+    """Read the result of a query. A server exception does not close the connection. `Client.execute` closes it."""
     while True:
         packet = connection.receive_packet()
         if packet.type == ServerPacketTypes.EXCEPTION:
@@ -67,7 +69,7 @@ def state(connection_id):
 
 client = Client(CLICKHOUSE_HOST, port=CLICKHOUSE_PORT_TCP, user="default", password="")
 
-# The query sees its own connection as active.
+# The query sees its connection as active.
 connection_id = client.execute(
     "SELECT connection_id FROM system.connections WHERE query_id = currentQueryID() AND status = 'active'"
 )[0][0]
@@ -76,7 +78,7 @@ connection = client.connection
 print("--- idle after a successful query")
 print(state(connection_id))
 
-print("--- active while a query runs")
+print("--- active when a query runs")
 running_query_id = str(uuid.uuid4())
 send_query(connection, "SELECT sleepEachRow(0.1) FROM system.numbers SETTINGS max_block_size = 1", running_query_id)
 wait_for(
@@ -87,7 +89,7 @@ print("active")
 observe(f"KILL QUERY WHERE query_id = '{running_query_id}' SYNC FORMAT Null")
 receive_result(connection)
 
-print("--- idle after the query is killed")
+print("--- idle after KILL QUERY")
 print(state(connection_id))
 
 print("--- idle after a query fails")
@@ -97,7 +99,7 @@ print(receive_result(connection))
 print(state(connection_id))
 print(observe(f"SELECT count() FROM system.connections WHERE query_id = '{failed_query_id}'"))
 
-print("--- the connection is still usable")
+print("--- the connection can run a query")
 send_query(connection, "SELECT 1", str(uuid.uuid4()))
 print(receive_result(connection))
 

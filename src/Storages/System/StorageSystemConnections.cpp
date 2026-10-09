@@ -22,28 +22,28 @@ ColumnsDescription StorageSystemConnections::getColumnsDescription()
 
     return ColumnsDescription
     {
-        {"connection_id",          std::make_shared<DataTypeUInt64>(),                                       "Unique identifier of the connection, assigned when the connection is registered: after authentication for TCP connections, and on the first query for HTTP connections."},
-        {"protocol",               low_cardinality_string,                                                   "Protocol used by the connection: TCP (native protocol) or HTTP."},
-        {"client_address",         DataTypeFactory::instance().get("IPv6"),                                  "IP address of the client. Behind a proxy, it is the address of the original client when the server is configured to trust the PROXY protocol or the `X-Forwarded-For` header."},
-        {"client_port",            std::make_shared<DataTypeUInt16>(),                                       "TCP port of the client. For HTTP connections behind a proxy, it is the port of the proxy, because HTTP headers carry no client port."},
+        {"connection_id",          std::make_shared<DataTypeUInt64>(),                                       "Unique identifier of the connection. A TCP connection gets the identifier after authentication. An HTTP connection gets the identifier on its first query."},
+        {"protocol",               low_cardinality_string,                                                   "Protocol of the connection: TCP (native protocol) or HTTP."},
+        {"client_address",         DataTypeFactory::instance().get("IPv6"),                                  "IP address of the client. Behind a proxy, this is the address of the client if the server trusts the PROXY protocol or the `X-Forwarded-For` header."},
+        {"client_port",            std::make_shared<DataTypeUInt16>(),                                       "TCP port of the client. For an HTTP connection behind a proxy, this is the port of the proxy. HTTP headers do not contain the client port."},
         {"server_port",            std::make_shared<DataTypeUInt16>(),                                       "Server port that accepted the connection."},
-        {"user",                   std::make_shared<DataTypeString>(),                                       "Name of the authenticated user. For HTTP connections, it is the user of the most recent request, because requests on a keep-alive connection are authenticated separately."},
-        {"status",                 low_cardinality_string,                                                   "Connection status: `active` means a query is currently being executed, `idle` means the connection is open and waiting for the next query (or for the next request on an HTTP keep-alive connection)."},
-        {"query_id",               std::make_shared<DataTypeString>(),                                       "Identifier of the query currently being executed. Empty when the connection is idle."},
-        {"client_name",            std::make_shared<DataTypeString>(),                                       "Name of the client application: reported during the handshake for TCP connections, taken from the `User-Agent` header of the first query for HTTP connections."},
-        {"client_version_major",   std::make_shared<DataTypeUInt64>(),                                       "Major version of the client, as reported during the TCP handshake. 0 for HTTP connections."},
-        {"client_version_minor",   std::make_shared<DataTypeUInt64>(),                                       "Minor version of the client, as reported during the TCP handshake. 0 for HTTP connections."},
-        {"client_version_patch",   std::make_shared<DataTypeUInt64>(),                                       "Patch version of the client, as reported during the TCP handshake. 0 for HTTP connections."},
-        {"connected_time",         std::make_shared<DataTypeDateTime>(),                                     "Time at which the connection was established (for TCP connections, after authentication)."},
-        {"last_query_time",        std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "Time at which the most recent query on this connection started. NULL if no query has been executed yet."},
+        {"user",                   std::make_shared<DataTypeString>(),                                       "Name of the authenticated user. For an HTTP connection, this is the user of the last request. Each request on a keep-alive connection has its own authentication."},
+        {"status",                 low_cardinality_string,                                                   "Status of the connection. `active`: a query runs now. `idle`: the connection is open and waits for the next query or the next HTTP request."},
+        {"query_id",               std::make_shared<DataTypeString>(),                                       "Identifier of the query that runs now. Empty if the connection is idle."},
+        {"client_name",            std::make_shared<DataTypeString>(),                                       "Name of the client application. A TCP client sends this name in the handshake. For HTTP, this is the `User-Agent` header of the first query."},
+        {"client_version_major",   std::make_shared<DataTypeUInt64>(),                                       "Major version of the client from the TCP handshake. 0 for HTTP connections."},
+        {"client_version_minor",   std::make_shared<DataTypeUInt64>(),                                       "Minor version of the client from the TCP handshake. 0 for HTTP connections."},
+        {"client_version_patch",   std::make_shared<DataTypeUInt64>(),                                       "Patch version of the client from the TCP handshake. 0 for HTTP connections."},
+        {"connected_time",         std::make_shared<DataTypeDateTime>(),                                     "Time when the connection started. For a TCP connection, this is the time after authentication."},
+        {"last_query_time",        std::make_shared<DataTypeNullable>(std::make_shared<DataTypeDateTime>()), "Start time of the last query on this connection. NULL if the connection did not run a query."},
     };
 }
 
 
 void StorageSystemConnections::fillData(MutableColumns & res_columns, ContextPtr context, const ActionsDAG::Node *, std::vector<UInt8>) const
 {
-    /// Connections expose the addresses and activity of other users, so without the `SHOW CONNECTIONS`
-    /// privilege a user sees only their own connections.
+    /// The connections show the addresses and the queries of other users.
+    /// Thus, a user without the `SHOW CONNECTIONS` privilege sees only the connections of this user.
     const bool show_all_users = context->getAccess()->isGranted(AccessType::SHOW_CONNECTIONS);
     const String current_user = context->getClientInfo().current_user;
 
