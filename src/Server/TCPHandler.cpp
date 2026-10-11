@@ -555,15 +555,17 @@ void TCPHandler::runImpl()
         const auto client_addr = getClientAddress(client_info);
         ConnectionInfo info;
         info.protocol = "TCP";
-        info.client_address = client_addr.host();
-        info.client_port = client_addr.port();
         info.server_port = tcp_server.portNumber();
-        info.client_name = client_name;
         info.client_version_major = client_version_major;
         info.client_version_minor = client_version_minor;
         info.client_version_patch = client_version_patch;
         info.connected_time = std::time(nullptr);
-        connection_handle = ConnectionRegistry::instance().add(std::move(info), client_info.current_user);
+        ConnectionPeer peer;
+        peer.user = client_info.current_user;
+        peer.client_address = client_addr.host();
+        peer.client_port = client_addr.port();
+        peer.client_name = client_name;
+        connection_handle = ConnectionRegistry::instance().add(std::move(info), std::move(peer));
     }
 
     while (tcp_server.isOpen())
@@ -974,7 +976,7 @@ void TCPHandler::runImpl()
                 query_state->query_context->setSetting("enable_producing_buckets_out_of_order_in_aggregation", false);
 
             /// Set the connection to idle in `system.connections` at each exit from this scope. This includes exceptions.
-            connection_handle.setActive(query_state->query_context->getClientInfo().current_user, query_state->query_context->getCurrentQueryId());
+            connection_handle.setActive(query_state->query_context->getCurrentQueryId());
             SCOPE_EXIT(connection_handle.setIdle());
 
             /// Processing Query

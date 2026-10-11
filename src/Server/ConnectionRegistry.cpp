@@ -4,18 +4,27 @@
 namespace DB
 {
 
-ConnectionState::ConnectionState(UInt64 connection_id_, ConnectionInfo info_, String user_)
+ConnectionState::ConnectionState(UInt64 connection_id_, ConnectionInfo info_, ConnectionPeer peer_)
     : connection_id(connection_id_)
     , info(std::move(info_))
-    , user(std::move(user_))
+    , peer(std::move(peer_))
 {
 }
 
-void ConnectionState::setActive(const String & user_, const String & query_id_)
+void ConnectionState::setActive(const String & query_id_)
 {
     const time_t now = std::time(nullptr);
     std::lock_guard lock(mutex);
-    user = user_;
+    is_active = true;
+    query_id = query_id_;
+    last_query_time = now;
+}
+
+void ConnectionState::setActive(const String & query_id_, ConnectionPeer peer_)
+{
+    const time_t now = std::time(nullptr);
+    std::lock_guard lock(mutex);
+    peer = std::move(peer_);
     is_active = true;
     query_id = query_id_;
     last_query_time = now;
@@ -35,7 +44,7 @@ ConnectionSnapshot ConnectionState::getSnapshot() const
     snapshot.info = info;
 
     std::lock_guard lock(mutex);
-    snapshot.user = user;
+    snapshot.peer = peer;
     snapshot.is_active = is_active;
     snapshot.query_id = query_id;
     snapshot.last_query_time = last_query_time;
@@ -81,10 +90,16 @@ void ConnectionHandle::reset()
     registry = nullptr;
 }
 
-void ConnectionHandle::setActive(const String & user, const String & query_id)
+void ConnectionHandle::setActive(const String & query_id)
 {
     if (state)
-        state->setActive(user, query_id);
+        state->setActive(query_id);
+}
+
+void ConnectionHandle::setActive(const String & query_id, ConnectionPeer peer)
+{
+    if (state)
+        state->setActive(query_id, std::move(peer));
 }
 
 void ConnectionHandle::setIdle()
@@ -105,13 +120,13 @@ void ConnectionRegistry::enable()
     enabled.store(true, std::memory_order_relaxed);
 }
 
-ConnectionHandle ConnectionRegistry::add(ConnectionInfo info, String user)
+ConnectionHandle ConnectionRegistry::add(ConnectionInfo info, ConnectionPeer peer)
 {
     if (!isEnabled())
         return {};
 
     const UInt64 id = next_id.fetch_add(1, std::memory_order_relaxed);
-    auto state = std::make_shared<ConnectionState>(id, std::move(info), std::move(user));
+    auto state = std::make_shared<ConnectionState>(id, std::move(info), std::move(peer));
 
     {
         std::lock_guard lock(mutex);

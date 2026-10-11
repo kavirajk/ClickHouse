@@ -19,14 +19,23 @@ namespace DB
 struct ConnectionInfo
 {
     String protocol;            /// "TCP" or "HTTP"
-    Poco::Net::IPAddress client_address;
-    UInt16 client_port = 0;
     UInt16 server_port = 0;
-    String client_name;
     UInt64 client_version_major = 0;
     UInt64 client_version_minor = 0;
     UInt64 client_version_patch = 0;
     time_t connected_time = 0;
+};
+
+
+/// The properties of the client of a connection.
+/// For TCP, these properties do not change. For HTTP, each request sets these properties again.
+/// A reverse proxy can send the requests of different clients and users on one keep-alive connection.
+struct ConnectionPeer
+{
+    String user;
+    Poco::Net::IPAddress client_address;
+    UInt16 client_port = 0;
+    String client_name;
 };
 
 
@@ -35,7 +44,7 @@ struct ConnectionSnapshot
 {
     UInt64 connection_id = 0;
     ConnectionInfo info;
-    String user;
+    ConnectionPeer peer;
     bool is_active = false;     /// true when a query runs, false when the connection waits for the next query
     String query_id;            /// empty when the connection is idle
     time_t last_query_time = 0; /// 0 if the connection did not run a query
@@ -49,10 +58,12 @@ struct ConnectionSnapshot
 class ConnectionState
 {
 public:
-    ConnectionState(UInt64 connection_id_, ConnectionInfo info_, String user_);
+    ConnectionState(UInt64 connection_id_, ConnectionInfo info_, ConnectionPeer peer_);
 
-    /// Each query gives the user again. An HTTP keep-alive connection can have requests of different users.
-    void setActive(const String & user_, const String & query_id_);
+    /// Sets the connection to active. The client properties do not change.
+    void setActive(const String & query_id_);
+    /// Sets the connection to active and replaces the client properties.
+    void setActive(const String & query_id_, ConnectionPeer peer_);
     void setIdle();
 
     ConnectionSnapshot getSnapshot() const;
@@ -62,7 +73,7 @@ public:
 
 private:
     mutable std::mutex mutex;
-    String user TSA_GUARDED_BY(mutex);
+    ConnectionPeer peer TSA_GUARDED_BY(mutex);
     bool is_active TSA_GUARDED_BY(mutex) = false;
     String query_id TSA_GUARDED_BY(mutex);
     time_t last_query_time TSA_GUARDED_BY(mutex) = 0;
@@ -89,7 +100,8 @@ public:
 
     explicit operator bool() const { return state != nullptr; }
 
-    void setActive(const String & user, const String & query_id);
+    void setActive(const String & query_id);
+    void setActive(const String & query_id, ConnectionPeer peer);
     void setIdle();
 
 private:
@@ -129,7 +141,7 @@ public:
     bool isEnabled() const { return enabled.load(std::memory_order_relaxed); }
 
     /// Registers a connection. The connection is idle until the first call to `setActive`.
-    ConnectionHandle add(ConnectionInfo info, String user);
+    ConnectionHandle add(ConnectionInfo info, ConnectionPeer peer);
 
     /// Returns a copy of all registered connections.
     std::vector<ConnectionSnapshot> list() const;

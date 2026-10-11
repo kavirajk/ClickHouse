@@ -60,7 +60,9 @@ def receive_result(connection):
             return 0
 
 
-def state(connection_id):
+def idle_state(connection_id):
+    # The server sends the end of the result before it sets the connection to idle. Thus, wait for the idle status.
+    wait_for(f"SELECT status FROM system.connections WHERE connection_id = {connection_id}", "idle")
     return observe(
         "SELECT protocol, status, query_id = '', user, last_query_time >= connected_time "
         f"FROM system.connections WHERE connection_id = {connection_id}"
@@ -76,7 +78,7 @@ connection_id = client.execute(
 connection = client.connection
 
 print("--- idle after a successful query")
-print(state(connection_id))
+print(idle_state(connection_id))
 
 print("--- active when a query runs")
 running_query_id = str(uuid.uuid4())
@@ -90,13 +92,13 @@ observe(f"KILL QUERY WHERE query_id = '{running_query_id}' SYNC FORMAT Null")
 receive_result(connection)
 
 print("--- idle after KILL QUERY")
-print(state(connection_id))
+print(idle_state(connection_id))
 
 print("--- idle after a query fails")
 failed_query_id = str(uuid.uuid4())
 send_query(connection, "SELECT throwIf(number = 3, 'intentional test exception') FROM numbers(10) SETTINGS max_block_size = 1", failed_query_id)
 print(receive_result(connection))
-print(state(connection_id))
+print(idle_state(connection_id))
 print(observe(f"SELECT count() FROM system.connections WHERE query_id = '{failed_query_id}'"))
 
 print("--- the connection can run a query")
